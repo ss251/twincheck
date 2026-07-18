@@ -1,40 +1,45 @@
 #!/usr/bin/env bun
 /**
- * fleetmeter — thin CLI over FleetLedger on Monad testnet.
+ * donestamp — dual-principal completion receipts on Monad.
  *
- *   fleetmeter post   — read quota (quota-axi or JSON) → postSpend receipt tx
- *   fleetmeter gate   — canSpawn check; exit 1 on deny; optional signalDenied
- *   fleetmeter status — remaining / canSpawn snapshot
+ *   donestamp commit  — worker runs gate, posts commit (principal A)
+ *   donestamp accept  — accepter re-hashes evidence, co-signs (principal B)
+ *   donestamp reject  — accepter rejects claim (principal B)
+ *   donestamp check   — isDone / isPending / verify; exit 1 if not done
  */
 import { keccak256, stringToBytes, type Hex } from "viem";
-import { getConfig, txUrl, addressUrl, loadEnv } from "./config";
-import { resolveQuota } from "./quota";
+import { privateKeyToAccount } from "viem/accounts";
 import {
-  postSpendTx,
-  readCanSpawn,
-  readRemaining,
-  signalDeniedTx,
+  getConfig,
+  loadEnv,
+  asBytes32,
+  txUrl,
+  addressUrl,
+} from "./config";
+import {
+  acceptTx,
+  commitTx,
   getCode,
+  readIsDone,
+  readIsPending,
+  readVerify,
+  rejectTx,
 } from "./client";
+import { hashFile, hashLabel, runGate } from "./hash";
 
 function usage(): never {
-  console.log(`fleetmeter — onchain fleet quota ledger CLI
+  console.log(`donestamp — dual-principal agent "done" receipts
 
 Usage:
-  fleetmeter post  [--units N] [--file path.json] [--provider NAME] [--seat A|B]
-  fleetmeter gate  [--cost N] [--file path.json] [--provider NAME] [--seat A|B] [--signal]
-  fleetmeter status [--seat A|B]
+  donestamp commit --task <id> --spec <file|label> --evidence <file> [--require-pass-marker]
+  donestamp accept --task <id> --evidence <file|label>
+  donestamp reject --task <id> --reason <label>
+  donestamp check  --task <id> [--evidence <file|label>]
 
-Env (repo .env or process):
-  PRIVATE_KEY, FLEETLEDGER, MONAD_RPC_URL, MONAD_CHAIN_ID
-  POOL_ID, SEAT_ID, SEAT_B_ID (labels hashed to bytes32 if not 0x…)
-  FLEETMETER_QUOTA_FILE (optional JSON stub)
+Env: PRIVATE_KEY (worker A), PRINCIPAL_B_PRIVATE_KEY (accepter B),
+     DONESTAMP, MONAD_RPC_URL, MONAD_CHAIN_ID
 
-Quota source order for post/gate:
-  1. --units N
-  2. --file / FLEETMETER_QUOTA_FILE
-  3. quota-axi --json (if installed)
-  4. cli/examples/quota.json documented stub
+Exit codes: check/accept mismatch → 1
 `);
   process.exit(2);
 }
@@ -45,7 +50,7 @@ function parseArgs(argv: string[]) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") out.help = true;
-    else if (a === "--signal") out.signal = true;
+    else if (a === "--require-pass-marker") out.requirePassMarker = true;
     else if (a.startsWith("--")) {
       const key = a.slice(2);
       const val = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : "true";
@@ -55,161 +60,183 @@ function parseArgs(argv: string[]) {
   return { out, positionals };
 }
 
-function seatFor(cfg: ReturnType<typeof getConfig>, which?: string): Hex {
-  if (!which || which === "A" || which === "a" || which === "seat-a") return cfg.seatId;
-  if (which === "B" || which === "b" || which === "seat-b") {
-    if (!cfg.seatBId) throw new Error("SEAT_B_ID not configured");
-    return cfg.seatBId;
+function evidenceHashFromFlag(flags: Record<string, string | boolean>): Hex {
+  if (flags.evidence) {
+    const p = String(flags.evidence);
+    try {
+      return hashFile(p);
+    } catch {
+      return hashLabel(p);
+    }
   }
-  // raw label or hex
-  if (which.startsWith("0x") && which.length === 66) return which as Hex;
-  return keccak256(stringToBytes(which));
+  if (flags["evidence-label"]) return hashLabel(String(flags["evidence-label"]));
+  throw new Error("Need --evidence <file|label>");
 }
 
-async function cmdPost(flags: Record<string, string | boolean>) {
-  const cfg = getConfig();
-  const code = await getCode(cfg, cfg.ledger);
-  if (!code || code === "0x") {
-    throw new Error(`No contract code at ${cfg.ledger}. Deploy first (D2).`);
+function specHashFromFlag(flags: Record<string, string | boolean>): Hex {
+  if (!flags.spec) throw new Error("Need --spec <file|label>");
+  const p = String(flags.spec);
+  try {
+    return hashFile(p);
+  } catch {
+    return hashLabel(p);
   }
+}
 
-  const quota = await resolveQuota({
-    units: flags.units !== undefined ? BigInt(String(flags.units)) : undefined,
-    file: flags.file ? String(flags.file) : undefined,
-    provider: flags.provider ? String(flags.provider) : undefined,
+async function cmdCommit(flags: Record<string, string | boolean>) {
+  const cfg = getConfig();
+  const code = await getCode(cfg, cfg.stamp);
+  if (!code || code === "0x") throw new Error(`No code at ${cfg.stamp}`);
+
+  if (!flags.task) throw new Error("Need --task <id>");
+  const taskId = asBytes32(String(flags.task));
+  const specHash = specHashFromFlag(flags);
+
+  const gate = runGate({
+    evidencePath: flags.evidence ? String(flags.evidence) : undefined,
+    evidenceLabel: flags["evidence-label"]
+      ? String(flags["evidence-label"])
+      : flags.evidence
+        ? undefined
+        : String(flags.task),
+    requirePassMarker: Boolean(flags.requirePassMarker),
   });
 
-  const seatId = seatFor(cfg, flags.seat ? String(flags.seat) : undefined);
-  const receiptHash = keccak256(
-    stringToBytes(`${quota.receiptLabel}:${Date.now()}`),
-  );
-
-  console.log(
-    JSON.stringify(
-      {
-        action: "post",
-        ledger: cfg.ledger,
-        seatId,
-        units: quota.units.toString(),
-        source: quota.source,
-        provider: quota.provider,
-        percentUsed: quota.percentUsed,
-        receiptHash,
-      },
-      null,
-      2,
-    ),
-  );
-
-  const ok = await readCanSpawn(cfg, seatId, quota.units);
-  if (!ok) {
-    console.error("canSpawn=false — refusing to post (use `fleetmeter gate` for loud deny)");
-    process.exit(1);
-  }
-
-  const hash = await postSpendTx(cfg, seatId, quota.units, receiptHash);
-  const remaining = await readRemaining(cfg, seatId);
-  console.log(
-    JSON.stringify(
-      {
-        ok: true,
-        tx: hash,
-        explorer: txUrl(cfg, hash),
-        remaining: remaining.toString(),
-      },
-      null,
-      2,
-    ),
-  );
-}
-
-async function cmdGate(flags: Record<string, string | boolean>) {
-  const cfg = getConfig();
-  const seatId = seatFor(cfg, flags.seat ? String(flags.seat) : undefined);
-
-  let cost: bigint;
-  if (flags.cost !== undefined) {
-    cost = BigInt(String(flags.cost));
-  } else {
-    const quota = await resolveQuota({
-      units: flags.units !== undefined ? BigInt(String(flags.units)) : undefined,
-      file: flags.file ? String(flags.file) : undefined,
-      provider: flags.provider ? String(flags.provider) : undefined,
-    });
-    cost = quota.units;
-    console.error(`gate cost from ${quota.source}: ${cost}`);
-  }
-
-  const allowed = await readCanSpawn(cfg, seatId, cost);
-  const remaining = await readRemaining(cfg, seatId);
-
-  console.log(
-    JSON.stringify(
-      {
-        action: "gate",
-        ledger: cfg.ledger,
-        seatId,
-        cost: cost.toString(),
-        canSpawn: allowed,
-        remaining: remaining.toString(),
-        contract: addressUrl(cfg, cfg.ledger),
-      },
-      null,
-      2,
-    ),
-  );
-
-  if (allowed) {
-    process.exit(0);
-  }
-
-  // Loud denial path
-  if (flags.signal) {
-    const reason = keccak256(stringToBytes(`denied:${cost}:${Date.now()}`));
+  // If --evidence is a path that failed as file in runGate, handle label fallback
+  let evidenceHash = gate.evidenceHash;
+  if (flags.evidence) {
     try {
-      const hash = await signalDeniedTx(cfg, seatId, cost, reason);
-      console.error(`Denied onchain: ${txUrl(cfg, hash)}`);
-    } catch (e) {
-      console.error("signalDenied failed:", e);
+      evidenceHash = hashFile(String(flags.evidence));
+    } catch {
+      evidenceHash = hashLabel(String(flags.evidence));
     }
   }
 
-  console.error("DENIED: canSpawn=false — spawn blocked by FleetLedger");
-  process.exit(1);
-}
-
-async function cmdStatus(flags: Record<string, string | boolean>) {
-  const cfg = getConfig();
-  const seatId = seatFor(cfg, flags.seat ? String(flags.seat) : undefined);
-  const remaining = await readRemaining(cfg, seatId);
-  const sample = 1n;
-  const can = await readCanSpawn(cfg, seatId, sample);
+  const worker = privateKeyToAccount(cfg.workerKey).address;
   console.log(
     JSON.stringify(
       {
-        ledger: cfg.ledger,
-        explorer: addressUrl(cfg, cfg.ledger),
-        seatId,
-        remaining: remaining.toString(),
-        canSpawn1: can,
+        action: "commit",
+        stamp: cfg.stamp,
+        worker,
+        taskId,
+        specHash,
+        evidenceHash,
+        gatePass: gate.pass,
+        note: gate.note,
       },
       null,
       2,
     ),
   );
+
+  const hash = await commitTx(cfg, taskId, specHash, evidenceHash, gate.pass);
+  console.log(
+    JSON.stringify(
+      { ok: true, tx: hash, explorer: txUrl(cfg, hash), pending: true },
+      null,
+      2,
+    ),
+  );
+}
+
+async function cmdAccept(flags: Record<string, string | boolean>) {
+  const cfg = getConfig();
+  if (!flags.task) throw new Error("Need --task <id>");
+  const taskId = asBytes32(String(flags.task));
+  const evidenceHash = evidenceHashFromFlag(flags);
+  const accepter = privateKeyToAccount(cfg.accepterKey).address;
+
+  console.log(
+    JSON.stringify(
+      {
+        action: "accept",
+        stamp: cfg.stamp,
+        accepter,
+        taskId,
+        evidenceHash,
+        verify: await readVerify(cfg, taskId, evidenceHash),
+      },
+      null,
+      2,
+    ),
+  );
+
+  const { hash, ok } = await acceptTx(cfg, taskId, evidenceHash);
+  const done = await readIsDone(cfg, taskId);
+  console.log(
+    JSON.stringify(
+      {
+        acceptReturned: ok,
+        isDone: done,
+        tx: hash,
+        explorer: txUrl(cfg, hash),
+      },
+      null,
+      2,
+    ),
+  );
+  if (!ok || !done) {
+    console.error("DENIED: evidence mismatch or not done — second principal refused");
+    process.exit(1);
+  }
+}
+
+async function cmdReject(flags: Record<string, string | boolean>) {
+  const cfg = getConfig();
+  if (!flags.task) throw new Error("Need --task <id>");
+  const taskId = asBytes32(String(flags.task));
+  const reason = asBytes32(String(flags.reason || "rejected"));
+  const hash = await rejectTx(cfg, taskId, reason);
+  console.log(
+    JSON.stringify(
+      { ok: true, tx: hash, explorer: txUrl(cfg, hash), isDone: false },
+      null,
+      2,
+    ),
+  );
+}
+
+async function cmdCheck(flags: Record<string, string | boolean>) {
+  const cfg = getConfig();
+  if (!flags.task) throw new Error("Need --task <id>");
+  const taskId = asBytes32(String(flags.task));
+  const done = await readIsDone(cfg, taskId);
+  const pending = await readIsPending(cfg, taskId);
+  let verified: boolean | undefined;
+  if (flags.evidence || flags["evidence-label"]) {
+    verified = await readVerify(cfg, taskId, evidenceHashFromFlag(flags));
+  }
+  console.log(
+    JSON.stringify(
+      {
+        stamp: cfg.stamp,
+        explorer: addressUrl(cfg, cfg.stamp),
+        taskId,
+        isDone: done,
+        isPending: pending,
+        verified,
+      },
+      null,
+      2,
+    ),
+  );
+  if (!done) {
+    console.error("NOT DONE: missing dual-principal accept");
+    process.exit(1);
+  }
 }
 
 async function main() {
   loadEnv();
-  const argv = process.argv.slice(2);
-  const { out, positionals } = parseArgs(argv);
+  const { out, positionals } = parseArgs(process.argv.slice(2));
   if (out.help || positionals.length === 0) usage();
-
   const cmd = positionals[0];
   try {
-    if (cmd === "post") await cmdPost(out);
-    else if (cmd === "gate") await cmdGate(out);
-    else if (cmd === "status") await cmdStatus(out);
+    if (cmd === "commit") await cmdCommit(out);
+    else if (cmd === "accept") await cmdAccept(out);
+    else if (cmd === "reject") await cmdReject(out);
+    else if (cmd === "check") await cmdCheck(out);
     else usage();
   } catch (e) {
     console.error(e instanceof Error ? e.message : e);

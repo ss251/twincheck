@@ -8,44 +8,34 @@
 | Chain ID | `10143` |
 | RPC | `https://testnet-rpc.monad.xyz` |
 | Explorer | https://testnet.monadvision.com |
-| Faucet | https://faucet.monad.xyz |
 
-Sources: [Monad testnets docs](https://docs.monad.xyz/developer-essentials/testnets) (fetched 2026-07-18).
-
-### FleetLedger
+### DoneStamp (shipping entry)
 
 | Field | Value |
 |-------|--------|
-| Address | [`0x3CE554b355002d6cc5d07Dd670c149815aFa3d14`](https://testnet.monadvision.com/address/0x3CE554b355002d6cc5d07Dd670c149815aFa3d14) |
-| Deployer (principal A) | `0xB99348aCC284E70cD832Fec09a0fC4A88879b5ac` |
-| Principal B | `0xe6781A81704D9eaCe07AAc3c22D5bBC30C90417B` |
-| Deploy tx | [`0x4b422e12c8f2bcf4d43c791f890028e85a39456ff96301625ccbe40b95129dfa`](https://testnet.monadvision.com/tx/0x4b422e12c8f2bcf4d43c791f890028e85a39456ff96301625ccbe40b95129dfa) |
-| Verified source | **exact_match** via Sourcify (`sourcify-api-monad.blockvision.org`) |
-| Explorer | https://testnet.monadvision.com/address/0x3CE554b355002d6cc5d07Dd670c149815aFa3d14 |
+| Address | [`0x6e234b4839641158B4E88Db59037B178BfcC31C8`](https://testnet.monadvision.com/address/0x6e234b4839641158B4E88Db59037B178BfcC31C8) |
+| Worker (principal A) | `0xB99348aCC284E70cD832Fec09a0fC4A88879b5ac` |
+| Accepter (principal B) | `0xe6781A81704D9eaCe07AAc3c22D5bBC30C90417B` |
+| Deploy tx | [`0xfe71635a93f7459fa021c71c0a7fc80db650e9e531d5f45c608480bffeca8940`](https://testnet.monadvision.com/tx/0xfe71635a93f7459fa021c71c0a7fc80db650e9e531d5f45c608480bffeca8940) |
+| Verified source | **exact_match** (Sourcify / BlockVision) |
+| Explorer | https://testnet.monadvision.com/address/0x6e234b4839641158B4E88Db59037B178BfcC31C8 |
 
-### Bootstrap (two-principal pool)
+### Live demo receipts
 
-| Field | Value |
-|-------|--------|
-| Pool label | `fleetmeter-spark` |
-| Pool id | `0x32815c174529d9368dd57b30cfc9bf746315087a001b616363c14e08e1e1f7f4` |
-| Seat A (`seat-principal-a`) | `0x91fbaaa3bb8aac6f0e21cac1c21729c5093bd24d361409ce3eb41592ddc3eebe` → controller A |
-| Seat B (`seat-principal-b`) | `0xbe8dca2292bf285bd67b81f43b2fb4ad937f0c1422abfec24f2ac024a9e4185f` → controller B |
-| Seat cap / pool ceiling | 10_000_000 / 15_000_000 micro-USD units |
-| Window | 5 hours (18_000 s) |
-| Bootstrap broadcast | `broadcast/Bootstrap.s.sol/10143/run-latest.json` |
+| Path | Tx |
+|------|-----|
+| Worker **commit** (allow) | [`0x4a8f360c…941d58b`](https://testnet.monadvision.com/tx/0x4a8f360c8c1ab4196eabd67c0ef890bbf8de5e7f71f833e2682023a61941d58b) |
+| Accepter **accept** (allow → isDone) | [`0x727de712…576b888`](https://testnet.monadvision.com/tx/0x727de71290d6a18ef510c9d678009cb86318fa2fbde83a57316c5c0d9576b888) |
+| Worker **commit** (deny task) | [`0x125a293f…a24baae`](https://testnet.monadvision.com/tx/0x125a293f31c108d8ccd55319ea3c27a4acb6405257dbb95c6bffe0df2a24baae) |
+| Accepter **Denied** (wrong evidence) | [`0xea27e5ae…79447bd`](https://testnet.monadvision.com/tx/0xea27e5ae67e1e7f6be1bf0ced8470ffa0cce15b42f06aae63877847db79447bd) |
 
-### Sample live receipts (CLI)
-
-| Action | Tx |
-|--------|-----|
-| `post` allow 100_000 | [`0x40a463c9…af4550`](https://testnet.monadvision.com/tx/0x40a463c900bd3b93ba5b6b1b3aae441d533f38cd70afdfc6ff893bc626af4550) |
-| `post` fill seat A | [`0x5bb9d6fc…7e7269`](https://testnet.monadvision.com/tx/0x5bb9d6fcdcacd0a0e2c46a13ea17331e2066a62e9e600144aa86a2ed7e7e7269) |
-| `gate --signal` Denied | [`0x0708efdc…9792ae`](https://testnet.monadvision.com/tx/0x0708efdc48bbdd323aef2ef664923e76b8df74a39263faae80dd1481909792ae) |
-
-### Dashboard (hosted)
+### Dashboard
 
 | Field | Value |
 |-------|--------|
 | Public URL | https://dashboard-pink-one-12.vercel.app |
-| Env | `VITE_FLEETLEDGER=0x3CE554b355002d6cc5d07Dd670c149815aFa3d14` |
+| Env | `VITE_DONESTAMP=0x6e234b4839641158B4E88Db59037B178BfcC31C8` |
+
+### Historical (superseded — not the Spark entry)
+
+FleetLedger `0x3CE554b355002d6cc5d07Dd670c149815aFa3d14` remains onchain as prior experiment; **submission is DoneStamp**.

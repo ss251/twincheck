@@ -1,15 +1,16 @@
 {
-  "name": "fleetmeter",
-  "version": "0.1.0",
+  "name": "donestamp",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "bin": {
-    "fleetmeter": "./src/index.ts"
+    "donestamp": "./src/index.ts"
   },
   "scripts": {
     "start": "bun run src/index.ts",
-    "post": "bun run src/index.ts post",
-    "gate": "bun run src/index.ts gate",
+    "commit": "bun run src/index.ts commit",
+    "accept": "bun run src/index.ts accept",
+    "check": "bun run src/index.ts check",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

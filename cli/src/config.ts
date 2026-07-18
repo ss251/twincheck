@@ -2,15 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { type Address, type Hex, isAddress, isHex, keccak256, toBytes } from "viem";
 
-export type FleetConfig = {
+export type StampConfig = {
   rpcUrl: string;
   chainId: number;
-  privateKey: Hex;
-  principalBPrivateKey?: Hex;
-  ledger: Address;
-  poolId: Hex;
-  seatId: Hex;
-  seatBId?: Hex;
+  workerKey: Hex;
+  accepterKey: Hex;
+  stamp: Address;
   explorerBase: string;
 };
 
@@ -34,14 +31,14 @@ function loadEnvFile(path: string): void {
   }
 }
 
-/** Load repo-root .env then cwd .env (later does not override earlier). */
 export function loadEnv(): void {
-  const roots = [
+  for (const p of [
     resolve(import.meta.dir, "../../.env"),
     resolve(process.cwd(), ".env"),
     resolve(process.cwd(), "../.env"),
-  ];
-  for (const p of roots) loadEnvFile(p);
+  ]) {
+    loadEnvFile(p);
+  }
 }
 
 function requireEnv(name: string): string {
@@ -50,63 +47,45 @@ function requireEnv(name: string): string {
   return v;
 }
 
-function asHex32(name: string, raw: string): Hex {
-  if (isHex(raw) && raw.length === 66) return raw;
-  // Allow human labels: hash to bytes32
-  return keccak256(toBytes(raw));
+function asHexKey(name: string, raw: string): Hex {
+  let h = raw.trim();
+  if (!h.startsWith("0x")) h = `0x${h}`;
+  if (!isHex(h) || h.length !== 66) {
+    throw new Error(`${name} must be 0x-prefixed 32-byte hex`);
+  }
+  return h as Hex;
 }
 
-export function getConfig(): FleetConfig {
+export function asBytes32(labelOrHex: string): Hex {
+  if (isHex(labelOrHex) && labelOrHex.length === 66) return labelOrHex as Hex;
+  return keccak256(toBytes(labelOrHex));
+}
+
+export function getConfig(): StampConfig {
   loadEnv();
-
-  const privateKey = requireEnv("PRIVATE_KEY") as Hex;
-  if (!isHex(privateKey) || privateKey.length !== 66) {
-    throw new Error("PRIVATE_KEY must be 0x-prefixed 32-byte hex");
-  }
-
-  const ledger = (process.env.FLEETLEDGER || process.env.FLEETLEDGER_ADDRESS || "") as Address;
-  if (!isAddress(ledger)) {
-    throw new Error(
-      "Set FLEETLEDGER to the deployed contract address (see DEPLOYMENTS.md after D2).",
-    );
-  }
-
-  const rpcUrl = process.env.MONAD_RPC_URL || "https://testnet-rpc.monad.xyz";
-  const chainId = Number(process.env.MONAD_CHAIN_ID || "10143");
-  const explorerBase =
-    process.env.MONAD_EXPLORER || "https://testnet.monadvision.com";
-
-  const poolId = asHex32(
-    "POOL_ID",
-    process.env.POOL_ID || "fleetmeter-spark",
+  const workerKey = asHexKey("PRIVATE_KEY", requireEnv("PRIVATE_KEY"));
+  const accepterKey = asHexKey(
+    "PRINCIPAL_B_PRIVATE_KEY",
+    requireEnv("PRINCIPAL_B_PRIVATE_KEY"),
   );
-  const seatId = asHex32(
-    "SEAT_ID",
-    process.env.SEAT_ID || "seat-principal-a",
-  );
-  const seatBId = process.env.SEAT_B_ID
-    ? asHex32("SEAT_B_ID", process.env.SEAT_B_ID)
-    : asHex32("SEAT_B_ID", "seat-principal-b");
-
-  const principalBPrivateKey = process.env.PRINCIPAL_B_PRIVATE_KEY as Hex | undefined;
-
+  const stamp = (process.env.DONESTAMP || process.env.DONESTAMP_ADDRESS || "") as Address;
+  if (!isAddress(stamp)) {
+    throw new Error("Set DONESTAMP to the deployed DoneStamp address (see DEPLOYMENTS.md).");
+  }
   return {
-    rpcUrl,
-    chainId,
-    privateKey,
-    principalBPrivateKey,
-    ledger,
-    poolId,
-    seatId,
-    seatBId,
-    explorerBase,
+    rpcUrl: process.env.MONAD_RPC_URL || "https://testnet-rpc.monad.xyz",
+    chainId: Number(process.env.MONAD_CHAIN_ID || "10143"),
+    workerKey,
+    accepterKey,
+    stamp,
+    explorerBase: process.env.MONAD_EXPLORER || "https://testnet.monadvision.com",
   };
 }
 
-export function txUrl(cfg: FleetConfig, hash: Hex): string {
+export function txUrl(cfg: StampConfig, hash: Hex): string {
   return `${cfg.explorerBase}/tx/${hash}`;
 }
 
-export function addressUrl(cfg: FleetConfig, address: Address): string {
+export function addressUrl(cfg: StampConfig, address: Address): string {
   return `${cfg.explorerBase}/address/${address}`;
 }

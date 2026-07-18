@@ -13,10 +13,9 @@ export const MONAD_RPC =
 export const EXPLORER =
   import.meta.env.VITE_MONAD_EXPLORER || "https://testnet.monadvision.com";
 
-export const LEDGER = (import.meta.env.VITE_FLEETLEDGER || "") as Address;
-export const POOL_LABEL = import.meta.env.VITE_POOL_ID || "fleetmeter-spark";
-export const SEAT_A_LABEL = import.meta.env.VITE_SEAT_ID || "seat-principal-a";
-export const SEAT_B_LABEL = import.meta.env.VITE_SEAT_B_ID || "seat-principal-b";
+export const STAMP = (import.meta.env.VITE_DONESTAMP ||
+  import.meta.env.VITE_FLEETLEDGER ||
+  "") as Address;
 
 export const client = createPublicClient({
   chain: {
@@ -28,118 +27,86 @@ export const client = createPublicClient({
   transport: http(MONAD_RPC),
 });
 
-export const fleetAbi = [
+export const stampAbi = [
   {
     type: "function",
-    name: "remaining",
+    name: "isDone",
     stateMutability: "view",
-    inputs: [{ name: "seatId", type: "bytes32" }],
-    outputs: [{ type: "uint128" }],
-  },
-  {
-    type: "function",
-    name: "poolRemaining",
-    stateMutability: "view",
-    inputs: [{ name: "poolId", type: "bytes32" }],
-    outputs: [{ type: "uint128" }],
-  },
-  {
-    type: "function",
-    name: "canSpawn",
-    stateMutability: "view",
-    inputs: [
-      { name: "seatId", type: "bytes32" },
-      { name: "cost", type: "uint128" },
-    ],
+    inputs: [{ name: "taskId", type: "bytes32" }],
     outputs: [{ type: "bool" }],
   },
   {
     type: "function",
-    name: "seats",
+    name: "isPending",
     stateMutability: "view",
-    inputs: [{ name: "seatId", type: "bytes32" }],
-    outputs: [
-      { name: "controller", type: "address" },
-      { name: "poolId", type: "bytes32" },
-      { name: "spent", type: "uint128" },
-      { name: "cap", type: "uint128" },
-      { name: "windowStart", type: "uint64" },
-      { name: "windowSeconds", type: "uint64" },
-      { name: "exists", type: "bool" },
-    ],
+    inputs: [{ name: "taskId", type: "bytes32" }],
+    outputs: [{ type: "bool" }],
   },
   {
     type: "function",
-    name: "pools",
+    name: "receipts",
     stateMutability: "view",
-    inputs: [{ name: "poolId", type: "bytes32" }],
+    inputs: [{ name: "taskId", type: "bytes32" }],
     outputs: [
-      { name: "admin", type: "address" },
-      { name: "orchestrator", type: "address" },
-      { name: "spent", type: "uint128" },
-      { name: "ceiling", type: "uint128" },
-      { name: "windowStart", type: "uint64" },
-      { name: "windowSeconds", type: "uint64" },
+      { name: "worker", type: "address" },
+      { name: "accepter", type: "address" },
+      { name: "specHash", type: "bytes32" },
+      { name: "evidenceHash", type: "bytes32" },
+      { name: "gatePass", type: "bool" },
+      { name: "accepted", type: "bool" },
+      { name: "rejected", type: "bool" },
+      { name: "committedAt", type: "uint64" },
+      { name: "decidedAt", type: "uint64" },
       { name: "exists", type: "bool" },
     ],
   },
 ] as const;
 
-export const spendEvent = parseAbiItem(
-  "event Spend(bytes32 indexed seatId, bytes32 indexed poolId, address indexed spender, uint128 units, uint128 seatSpentAfter, uint128 poolSpentAfter, uint64 seatWindowStart, bytes32 receiptHash)",
+export const committedEvent = parseAbiItem(
+  "event Committed(bytes32 indexed taskId, address indexed worker, bytes32 specHash, bytes32 evidenceHash, bool gatePass, uint64 committedAt)",
 );
-export const softStopEvent = parseAbiItem(
-  "event SoftStop(bytes32 indexed seatId, bytes32 indexed poolId, uint128 spent, uint128 cap, uint16 bps)",
+export const acceptedEvent = parseAbiItem(
+  "event Accepted(bytes32 indexed taskId, address indexed accepter, bytes32 evidenceHash, uint64 decidedAt)",
 );
-export const hardStopEvent = parseAbiItem(
-  "event HardStop(bytes32 indexed seatId, bytes32 indexed poolId, uint128 spent, uint128 cap, uint16 bps)",
+export const rejectedEvent = parseAbiItem(
+  "event Rejected(bytes32 indexed taskId, address indexed accepter, bytes32 reason, uint64 decidedAt)",
 );
 export const deniedEvent = parseAbiItem(
-  "event Denied(bytes32 indexed seatId, bytes32 indexed poolId, address indexed reporter, uint128 cost, bytes32 reason)",
-);
-export const seatRegisteredEvent = parseAbiItem(
-  "event SeatRegistered(bytes32 indexed seatId, bytes32 indexed poolId, address indexed controller, uint64 windowSeconds, uint128 capUnits)",
+  "event Denied(bytes32 indexed taskId, address indexed caller, bytes32 providedHash, bytes32 expectedHash)",
 );
 
 export type ChainEvent =
   | {
-      kind: "Spend";
-      seatId: Hex;
-      poolId: Hex;
-      spender: Address;
-      units: bigint;
-      seatSpentAfter: bigint;
-      poolSpentAfter: bigint;
+      kind: "Committed";
+      taskId: Hex;
+      worker: Address;
+      evidenceHash: Hex;
+      gatePass: boolean;
       tx: Hex;
       blockNumber: bigint;
     }
   | {
-      kind: "SoftStop" | "HardStop";
-      seatId: Hex;
-      poolId: Hex;
-      spent: bigint;
-      cap: bigint;
-      bps: number;
+      kind: "Accepted";
+      taskId: Hex;
+      accepter: Address;
+      evidenceHash: Hex;
       tx: Hex;
       blockNumber: bigint;
     }
   | {
-      kind: "Denied";
-      seatId: Hex;
-      poolId: Hex;
-      reporter: Address;
-      cost: bigint;
+      kind: "Rejected";
+      taskId: Hex;
+      accepter: Address;
       reason: Hex;
       tx: Hex;
       blockNumber: bigint;
     }
   | {
-      kind: "SeatRegistered";
-      seatId: Hex;
-      poolId: Hex;
-      controller: Address;
-      windowSeconds: bigint;
-      capUnits: bigint;
+      kind: "Denied";
+      taskId: Hex;
+      caller: Address;
+      providedHash: Hex;
+      expectedHash: Hex;
       tx: Hex;
       blockNumber: bigint;
     };
@@ -165,27 +132,33 @@ export function logToEvent(log: Log & { args?: any; eventName?: string }): Chain
   const blockNumber = log.blockNumber ?? 0n;
   const a = log.args || {};
   const name = log.eventName;
-  if (name === "Spend") {
+  if (name === "Committed") {
     return {
-      kind: "Spend",
-      seatId: a.seatId,
-      poolId: a.poolId,
-      spender: a.spender,
-      units: a.units,
-      seatSpentAfter: a.seatSpentAfter,
-      poolSpentAfter: a.poolSpentAfter,
+      kind: "Committed",
+      taskId: a.taskId,
+      worker: a.worker,
+      evidenceHash: a.evidenceHash,
+      gatePass: a.gatePass,
       tx,
       blockNumber,
     };
   }
-  if (name === "SoftStop" || name === "HardStop") {
+  if (name === "Accepted") {
     return {
-      kind: name,
-      seatId: a.seatId,
-      poolId: a.poolId,
-      spent: a.spent,
-      cap: a.cap,
-      bps: Number(a.bps),
+      kind: "Accepted",
+      taskId: a.taskId,
+      accepter: a.accepter,
+      evidenceHash: a.evidenceHash,
+      tx,
+      blockNumber,
+    };
+  }
+  if (name === "Rejected") {
+    return {
+      kind: "Rejected",
+      taskId: a.taskId,
+      accepter: a.accepter,
+      reason: a.reason,
       tx,
       blockNumber,
     };
@@ -193,23 +166,10 @@ export function logToEvent(log: Log & { args?: any; eventName?: string }): Chain
   if (name === "Denied") {
     return {
       kind: "Denied",
-      seatId: a.seatId,
-      poolId: a.poolId,
-      reporter: a.reporter,
-      cost: a.cost,
-      reason: a.reason,
-      tx,
-      blockNumber,
-    };
-  }
-  if (name === "SeatRegistered") {
-    return {
-      kind: "SeatRegistered",
-      seatId: a.seatId,
-      poolId: a.poolId,
-      controller: a.controller,
-      windowSeconds: a.windowSeconds,
-      capUnits: a.capUnits,
+      taskId: a.taskId,
+      caller: a.caller,
+      providedHash: a.providedHash,
+      expectedHash: a.expectedHash,
       tx,
       blockNumber,
     };
