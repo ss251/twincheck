@@ -2,15 +2,15 @@
 pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
-import {FleetLedger} from "../src/FleetLedger.sol";
+import {DoneStamp} from "../src/DoneStamp.sol";
 
-/// @notice Deploy FleetLedger to Monad testnet (or any EVM RPC via --rpc-url).
-contract DeployFleetLedger is Script {
-    function run() external returns (FleetLedger ledger) {
+/// @notice Deploy DoneStamp to Monad testnet (or any EVM RPC via --rpc-url).
+contract DeployDoneStamp is Script {
+    function run() external returns (DoneStamp stamp) {
         uint256 pk = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(pk);
-        ledger = new FleetLedger();
+        stamp = new DoneStamp();
         vm.stopBroadcast();
-        console2.log("FleetLedger deployed at:", address(ledger));
+        console2.log("DoneStamp deployed at:", address(stamp));
     }
 }
