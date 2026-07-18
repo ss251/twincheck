@@ -29,6 +29,7 @@ contract FleetLedger {
     error PoolQuotaExceeded(bytes32 poolId, uint128 spent, uint128 cost, uint128 ceiling);
     error ZeroAddress();
     error NotOverBudget();
+    error ZeroUnits();
 
     // ─────────────────────────────────────────────────────────────────────────
     // Events (history layer — indexers / dashboard read these)
@@ -238,6 +239,8 @@ contract FleetLedger {
     /// @notice Append a spend receipt. Auto-rolls seat and pool windows by block.timestamp.
     /// @dev Only the seat controller or the pool orchestrator may post. Reverts on quota exceed.
     function postSpend(bytes32 seatId, uint128 units, bytes32 receiptHash) external {
+        if (units == 0) revert ZeroUnits();
+
         Seat storage s = seats[seatId];
         if (!s.exists) revert SeatNotFound(seatId);
 

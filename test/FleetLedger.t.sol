@@ -93,6 +93,12 @@ contract FleetLedgerTest is Test {
         assertEq(ledger.remaining(SEAT_A), SEAT_CAP - 100);
     }
 
+    function test_postSpend_revertsOnZeroUnits() public {
+        vm.prank(principalA);
+        vm.expectRevert(FleetLedger.ZeroUnits.selector);
+        ledger.postSpend(SEAT_A, 0, RECEIPT);
+    }
+
     function test_postSpend_orchestratorCanPostAnySeatInPool() public {
         vm.prank(principalA);
         ledger.setOrchestrator(POOL, orchestrator);
