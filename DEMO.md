@@ -1,71 +1,67 @@
-# DEMO.md — DoneStamp (≤3 min)
+# TwinCheck demo script (~90s)
 
-**Live system only:** real Monad txs, dual EOAs, verified contract, public dashboard.
+## One-liner
 
----
+**I copy addresses from Monad’s official protocols list — TwinCheck shows dual Monadscan + MonadVision verify status on-chain, and pulses when it flips.**
 
-## Pre-flight
+Problem source: [monad-crypto/protocols#369](https://github.com/monad-crypto/protocols/issues/369)
 
-1. `forge test` green (DoneStamp suite).  
-2. `DEPLOYMENTS.md` address matches explorer **exact_match**.  
-3. `.env` has `DONESTAMP`, `PRIVATE_KEY` (A), `PRINCIPAL_B_PRIVATE_KEY` (B).  
-4. Dashboard URL loads with stamp address.  
-5. Fixtures: `cli/examples/{spec,evidence-pass,evidence-fail}.txt`.
+## Setup
 
----
+- Contract: `0x44071F6881ae0F49dD466198dA2BFe8895D8D72C` (Monad testnet)
+- Dashboard: (URL in DEPLOYMENTS.md)
+- CLI: `cd cli && bun run src/index.ts`
 
-## Script
+## Walkthrough
 
-### Beat 1 — The lie (0:00–0:30)
+### 1. The problem (15s)
 
-> "My agents say done. That's vibes. Pasted-proof exists because they skip tests. CodexBar knows usage — not completion."
+Open issue #369. Official registry has ~1.7k addresses. An address can be verified on one explorer and not the other. No automation.
 
-### Beat 2 — Clean allow (0:30–1:30)
+### 2. Live probe (20s)
 
 ```bash
-cd cli
-bun run src/index.ts commit --task demo-cam-allow \
-  --spec examples/spec.txt --evidence examples/evidence-pass.txt --require-pass-marker
-# show worker A address on explorer
-bun run src/index.ts accept --task demo-cam-allow --evidence examples/evidence-pass.txt
-# exit 0; isDone true
-bun run src/index.ts check --task demo-cam-allow
+bun run src/index.ts probe --address 0x93FE94Ad887a1B04DBFf1f736bfcD1698D4cfF66
 ```
 
-**Show:** two different EOAs on txs; dashboard Committed → Accepted; explorer links.
+Shows dualOK true for the #369 example (now fixed on mainnet) — or pick a split from the dashboard.
 
-### Beat 3 — Loud Denied (1:30–2:30)
+### 3. Split card — TwinCheck itself (20s)
+
+TwinCheck contract is **Vision exact_match** and **Monadscan unverified** at deploy time — the exact dual-status failure mode:
 
 ```bash
-bun run src/index.ts commit --task demo-cam-deny \
-  --spec examples/spec.txt --evidence examples/evidence-pass.txt --require-pass-marker
-bun run src/index.ts accept --task demo-cam-deny --evidence examples/evidence-fail.txt
-echo $?   # 1
-bun run src/index.ts check --task demo-cam-deny
-echo $?   # 1
+PROBE_CHAIN_ID=10143 MONADSCAN_BASE=https://testnet.monadscan.com \
+  bun run src/index.ts card --address 0x44071F6881ae0F49dD466198dA2BFe8895D8D72C
 ```
 
-**Show:** Denied event on dashboard; still pending/not done; "wrong evidence cannot co-sign."
+Dashboard card: scan ✗ · vision ✓ · not dual.
 
-### Beat 4 — Close (2:30–3:00)
+### 4. Dual-principal settle (20s)
 
-Verified source + dual-principal story + "fork it, require co-sign on your loops."
+Show two report txs (A then B) on explorer — both must agree before settle.
 
----
+### 5. Registry sample (15s)
 
-## Shot list
+```bash
+bun run src/index.ts run --limit 4
+```
 
-| # | Shot |
-|---|------|
-| 1 | Terminal commit (worker A) |
-| 2 | Explorer commit tx |
-| 3 | Terminal accept (accepter B) |
-| 4 | Dashboard Accepted row |
-| 5 | Deny path exit code 1 |
-| 6 | Denied event + verified contract |
+Loads live CSV from GitHub, probes real explorers, posts cards.
 
----
+## Receipts (example run)
 
-## Do not show
+| Action | Tx / note |
+|--------|-----------|
+| Deploy | broadcast `DeployTwinCheck.s.sol` → `0x44071F…D72C` |
+| Watch + split self-check | scan false, vision true, settled |
+| Issue #369 example dual OK | settled dualOK true |
+| Unverified registry row | both false |
 
-FleetMeter quota UI, single-EOA accept, mock RPC, placeholder event arrays.
+## Judging checklist
+
+- [x] Real contract on Monad testnet  
+- [x] Live web demo (no hardcoded success toasts)  
+- [x] Public problem citation (#369)  
+- [x] Zero mocks in checker path  
+- [x] Dual principal A/B  

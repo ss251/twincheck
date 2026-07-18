@@ -1,18 +1,38 @@
-# BuildAnything Spark — submission fields (DoneStamp)
+# Spark submission — TwinCheck
 
-| Field | Value |
-|-------|--------|
-| **Project name** | DoneStamp |
-| **One-liner** | Dual-principal onchain completion receipts — agent "done" requires a second accepter who re-hashes the gate. |
-| **Public GitHub repo** | **TODO** — push this repo and paste URL |
-| **Hosted web demo URL** | https://dashboard-pink-one-12.vercel.app |
-| **Contract address (Monad testnet)** | `0x6e234b4839641158B4E88Db59037B178BfcC31C8` |
-| **Explorer link** | https://testnet.monadvision.com/address/0x6e234b4839641158B4E88Db59037B178BfcC31C8 |
-| **Demo video (≤3 min)** | **TODO** — human records from `DEMO.md` |
-| **Social post** | **TODO** — build-in-public: agents lie about done → dual-principal receipt → explorer |
+## Name
+TwinCheck
 
-## Judge framing
+## Description
+Dual-explorer (Monadscan + MonadVision) source-verification cards for addresses in the official Monad protocols registry, with dual-principal on-chain settle and pulse on status flip.
 
-- Real itch: pasted-proof / agents claiming done without evidence (this week).  
-- Why onchain: two EOAs; worker cannot forge accepter.  
-- Not CodexBar: usage ≠ completion integrity.
+## Problem
+Integrators copy addresses from [`monad-crypto/protocols`](https://github.com/monad-crypto/protocols) (~1.7k mainnet rows) without knowing if source is verified on **both** explorers. The foundation filed this as [**issue #369**](https://github.com/monad-crypto/protocols/issues/369) — still open with no automation. Manual dual browser checks do not scale; existing tools (e.g. pev) only hit one Sourcify path.
+
+## Solution
+1. Live checker probes both explorers (zero mocks).  
+2. Principals A + B co-attest matching results on TwinCheck.  
+3. Dashboard shows dual-verify cards + live pulse feed.  
+
+## Project URL
+https://dashboard-pink-one-12.vercel.app
+
+## Github repo
+(this repository)
+
+## Category
+Monad Testnet (chain 10143)
+
+## Contract address
+`0x44071F6881ae0F49dD466198dA2BFe8895D8D72C`
+
+## Demo video
+(record from DEMO.md)
+
+## Post URL
+(X post after ship)
+
+## Why elegant
+- Traces to a **named** ecosystem issue, not a DeFi-safety trope  
+- Dual principal matches two funded keys  
+- Product is the gap: dual status itself (Vision✓ Scan✗ is a first-class card)  

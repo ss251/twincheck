@@ -1,95 +1,78 @@
-# DoneStamp
+# TwinCheck
 
-**Dual-principal onchain completion receipts for agent "done" claims.**
+**Dual-explorer source verification for Monad’s official protocol address book.**
 
-Monad BuildAnything Spark · practical > fancy · OSS.
+When you copy an address from [`monad-crypto/protocols`](https://github.com/monad-crypto/protocols), TwinCheck tells you whether source is verified on **both** [Monadscan](https://monadscan.com) **and** [MonadVision](https://monadvision.com) — and posts a public on-chain pulse when that dual status flips.
 
----
+> Closes the open ecosystem gap:  
+> [**protocols#369** — automatic check that all contracts are verified on both monadvision and monadscan](https://github.com/monad-crypto/protocols/issues/369)
 
-## One-sentence wedge
+This is a problem the **Monad ecosystem** has — not a generic rug-checker.
 
-> **Every agent "done" is a dual-principal onchain receipt — the worker posts gate hashes, a second accepter re-runs and co-signs, so vibes cannot replace proof.**
+## Why TwinCheck
 
-## The real problem (this week)
+| Today | TwinCheck |
+|-------|-----------|
+| Hand-open both explorers for ~1.7k registry addresses | Live dual probe + dual-principal on-chain card |
+| pev / tools only hit one Sourcify path | Explicit dual status: scanOK × visionOK |
+| Split status is invisible | Settled cards + `DualStatusPulse` events |
 
-Unattended agent loops claim "done" as a speech act. The house already runs **pasted-proof discipline** because that speech act is unreliable: agents skip tests, invent checklists, or edit their own logs. A markdown receipt on the worker machine is self-serving. A git commit can be force-pushed. Usage tools (e.g. **CodexBar**) track *how much* was spent — not whether the *work* is actually complete.
+## Live (Monad Testnet)
 
-DoneStamp makes completion a **two-party onchain object**:
+| | |
+|--|--|
+| **Contract** | [`0x44071F6881ae0F49dD466198dA2BFe8895D8D72C`](https://testnet.monadvision.com/address/0x44071F6881ae0F49dD466198dA2BFe8895D8D72C) |
+| **Chain** | Monad Testnet `10143` |
+| **Attestor A** | `0xB99348aCC284E70cD832Fec09a0fC4A88879b5ac` |
+| **Attestor B** | `0xe6781A81704D9eaCe07AAc3c22D5bBC30C90417B` |
+| **Dashboard** | see `DEPLOYMENTS.md` |
+| **Vision verify** | Sourcify **exact_match** |
+| **Scan verify** | requires Etherscan API key (docs); TwinCheck *detects* unverified on scan as the product |
 
-1. **Worker** (principal A) runs a deterministic gate, commits `specHash` + `evidenceHash` + `gatePass`.
-2. **Accepter** (principal B — human, CI box, or skeptic agent) re-hashes the same evidence and calls `accept`.
-3. `isDone(taskId)` is true **only** after that co-sign. Mismatch → onchain `Denied` (and still not done).
+## Architecture
 
-## Why onchain is load-bearing (not a database)
+1. **Contract** (`src/TwinCheck.sol`) — watchlist + dual-principal `report` → settle; pulse on flip  
+2. **Checker** (`cli/`) — loads official CSV, probes both explorers (zero mocks), attests with keys A then B  
+3. **Dashboard** (`dashboard/`) — dual-verify cards + live event feed  
 
-| Local DB / log | DoneStamp |
-|----------------|-----------|
-| Owner can rewrite history | Worker cannot forge accepter's signature |
-| Single machine is root of trust | Two independent EOAs; shared clock is `block.timestamp` |
-| "Done" is private vibes | Append-only `Committed` / `Accepted` / `Denied` events |
-
-Monad's cheap, fast blocks make **per-task receipts free** — the right substrate for high-frequency agent loops.
-
-## What ships
-
-| Piece | Role |
-|-------|------|
-| `src/DoneStamp.sol` | `commit` / `accept` / `reject` / `isDone` / `verify` |
-| `cli/` (`bun`) | `donestamp commit\|accept\|reject\|check` |
-| `dashboard/` | Live event tape of commits, accepts, denies |
-| Foundry tests | Dual-principal ACL, allow/deny, mismatch Denied |
-
-## Setup
+## Quick start
 
 ```bash
-forge test
-source .env   # PRIVATE_KEY, PRINCIPAL_B_PRIVATE_KEY, DONESTAMP, MONAD_RPC_URL
-```
+# env: PRIVATE_KEY, PRINCIPAL_B_PRIVATE_KEY, TWINCHECK, MONAD_RPC_URL
+cp .env.example .env   # fill keys
 
-### CLI
+forge test --match-contract TwinCheckTest
+forge script script/DeployTwinCheck.s.sol:DeployTwinCheck --rpc-url $MONAD_RPC_URL --broadcast
 
-```bash
+# verify on MonadVision
+forge verify-contract $TWINCHECK src/TwinCheck.sol:TwinCheck \
+  --chain 10143 --verifier sourcify \
+  --verifier-url https://sourcify-api-monad.blockvision.org/ \
+  --constructor-args $(cast abi-encode "constructor(address,address)" $DEPLOYER_ADDRESS $PRINCIPAL_B_ADDRESS)
+
 cd cli && bun install
-# Worker A
-bun run src/index.ts commit --task my-task \
-  --spec examples/spec.txt \
-  --evidence examples/evidence-pass.txt --require-pass-marker
-# Accepter B (matching evidence)
-bun run src/index.ts accept --task my-task --evidence examples/evidence-pass.txt
-# Loud deny (wrong file)
-bun run src/index.ts accept --task other-task --evidence examples/evidence-fail.txt  # exit 1
-bun run src/index.ts check --task my-task   # exit 0 if isDone
+bun run src/index.ts probe --address 0x93FE94Ad887a1B04DBFf1f736bfcD1698D4cfF66
+bun run src/index.ts run --limit 5
+
+cd ../dashboard && bun install && bun run dev
 ```
 
-### Dashboard
+## CLI
 
-```bash
-cd dashboard && bun install
-# VITE_DONESTAMP=0x… in .env
-bun run dev
+```
+twincheck probe --address 0x…     # live dual-explorer check
+twincheck watch --limit 10        # watch registry sample
+twincheck check --address 0x…     # probe + dual-principal onchain report
+twincheck run --limit 5           # end-to-end sample
+twincheck card --address 0x…
 ```
 
-Live: see `DEPLOYMENTS.md`.
+## Honest limits
 
-## What this does NOT do yet
+- Dual **presence** of source verification — not bytecode equality across explorers, not a security audit.
+- Explorer HTML/API signals can lag; re-run the checker.
+- Monadscan forge verify needs an Etherscan API key per [Monad docs](https://docs.monad.xyz/guides/verify-smart-contract/foundry).
 
-- Bonding, slashing, or dispute games (ERC-8004-style optimistic verification)  
-- Automatic test runners in the contract (gate is offchain; hashes are onchain)  
-- Multi-accepter multisig or role registry  
-- Replacing git or CI — it **binds** their outputs to dual-principal finality  
+## Spark submission
 
-## Differentiate
-
-| Tool | Lane |
-|------|------|
-| **CodexBar / quota-axi** | Usage / remaining credits |
-| **CI / GitHub checks** | Org-scoped automation; single authority |
-| **DoneStamp** | Cross-principal, tamper-evident **completion** receipt |
-
-## Deployments
-
-See [`DEPLOYMENTS.md`](./DEPLOYMENTS.md).
-
-## License
-
-MIT
+See `submission.md` and `DEMO.md`. Axis: elegant solution to a real ecosystem problem (**#369**).

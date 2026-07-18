@@ -1,45 +1,45 @@
 #!/usr/bin/env bun
 /**
- * donestamp — dual-principal completion receipts on Monad.
+ * twincheck — dual-explorer verify status for monad-crypto/protocols addresses.
+ * Closes https://github.com/monad-crypto/protocols/issues/369
  *
- *   donestamp commit  — worker runs gate, posts commit (principal A)
- *   donestamp accept  — accepter re-hashes evidence, co-signs (principal B)
- *   donestamp reject  — accepter rejects claim (principal B)
- *   donestamp check   — isDone / isPending / verify; exit 1 if not done
+ *   twincheck probe   — live dual-explorer check (no chain write)
+ *   twincheck watch   — add addresses to onchain watchlist (principal A)
+ *   twincheck check   — probe + dual-principal report onchain (A then B)
+ *   twincheck card    — read settled card from chain
+ *   twincheck run     — sample registry, watch, dual-report (demo path)
  */
-import { keccak256, stringToBytes, type Hex } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import type { Address, Hex } from "viem";
+import { getConfig, loadEnv, txUrl, addressUrl } from "./config";
 import {
-  getConfig,
-  loadEnv,
-  asBytes32,
-  txUrl,
-  addressUrl,
-} from "./config";
-import {
-  acceptTx,
-  commitTx,
   getCode,
-  readIsDone,
-  readIsPending,
-  readVerify,
-  rejectTx,
+  hashEvidence,
+  readCard,
+  reportOne,
+  watchBatch,
+  watchOne,
 } from "./client";
-import { hashFile, hashLabel, runGate } from "./hash";
+import {
+  evidenceHashPayload,
+  probeDual,
+  type DualResult,
+} from "./explorers";
+import { fetchRegistryCsv, uniqueAddresses } from "./registry";
 
 function usage(): never {
-  console.log(`donestamp — dual-principal agent "done" receipts
+  console.log(`twincheck — dual Monadscan + MonadVision verify cards
 
 Usage:
-  donestamp commit --task <id> --spec <file|label> --evidence <file> [--require-pass-marker]
-  donestamp accept --task <id> --evidence <file|label>
-  donestamp reject --task <id> --reason <label>
-  donestamp check  --task <id> [--evidence <file|label>]
+  twincheck probe --address 0x...
+  twincheck watch --address 0x...              (or --limit N from registry)
+  twincheck check --address 0x...              probe + dual-principal onchain report
+  twincheck card  --address 0x...
+  twincheck run   [--limit N] [--seed ADDR]    registry sample → watch → check
 
-Env: PRIVATE_KEY (worker A), PRINCIPAL_B_PRIVATE_KEY (accepter B),
-     DONESTAMP, MONAD_RPC_URL, MONAD_CHAIN_ID
+Env: PRIVATE_KEY, PRINCIPAL_B_PRIVATE_KEY, TWINCHECK, MONAD_RPC_URL,
+     PROBE_CHAIN_ID (default 143 mainnet registry), REGISTRY_CSV_URL
 
-Exit codes: check/accept mismatch → 1
+Issue: https://github.com/monad-crypto/protocols/issues/369
 `);
   process.exit(2);
 }
@@ -50,7 +50,6 @@ function parseArgs(argv: string[]) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") out.help = true;
-    else if (a === "--require-pass-marker") out.requirePassMarker = true;
     else if (a.startsWith("--")) {
       const key = a.slice(2);
       const val = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : "true";
@@ -60,137 +59,94 @@ function parseArgs(argv: string[]) {
   return { out, positionals };
 }
 
-function evidenceHashFromFlag(flags: Record<string, string | boolean>): Hex {
-  if (flags.evidence) {
-    const p = String(flags.evidence);
-    try {
-      return hashFile(p);
-    } catch {
-      return hashLabel(p);
-    }
-  }
-  if (flags["evidence-label"]) return hashLabel(String(flags["evidence-label"]));
-  throw new Error("Need --evidence <file|label>");
+function asAddr(s: string): Address {
+  if (!/^0x[a-fA-F0-9]{40}$/.test(s)) throw new Error(`Bad address: ${s}`);
+  return s as Address;
 }
 
-function specHashFromFlag(flags: Record<string, string | boolean>): Hex {
-  if (!flags.spec) throw new Error("Need --spec <file|label>");
-  const p = String(flags.spec);
-  try {
-    return hashFile(p);
-  } catch {
-    return hashLabel(p);
-  }
-}
-
-async function cmdCommit(flags: Record<string, string | boolean>) {
+async function cmdProbe(flags: Record<string, string | boolean>) {
   const cfg = getConfig();
-  const code = await getCode(cfg, cfg.stamp);
-  if (!code || code === "0x") throw new Error(`No code at ${cfg.stamp}`);
+  const address = asAddr(String(flags.address));
+  const r = await probeDual(address, cfg);
+  printDual(r);
+  process.exit(r.scanOK && r.visionOK ? 0 : 1);
+}
 
-  if (!flags.task) throw new Error("Need --task <id>");
-  const taskId = asBytes32(String(flags.task));
-  const specHash = specHashFromFlag(flags);
-
-  const gate = runGate({
-    evidencePath: flags.evidence ? String(flags.evidence) : undefined,
-    evidenceLabel: flags["evidence-label"]
-      ? String(flags["evidence-label"])
-      : flags.evidence
-        ? undefined
-        : String(flags.task),
-    requirePassMarker: Boolean(flags.requirePassMarker),
-  });
-
-  // If --evidence is a path that failed as file in runGate, handle label fallback
-  let evidenceHash = gate.evidenceHash;
-  if (flags.evidence) {
-    try {
-      evidenceHash = hashFile(String(flags.evidence));
-    } catch {
-      evidenceHash = hashLabel(String(flags.evidence));
-    }
-  }
-
-  const worker = privateKeyToAccount(cfg.workerKey).address;
+function printDual(r: DualResult) {
+  const dual = r.scanOK && r.visionOK;
   console.log(
     JSON.stringify(
       {
-        action: "commit",
-        stamp: cfg.stamp,
-        worker,
-        taskId,
-        specHash,
-        evidenceHash,
-        gatePass: gate.pass,
-        note: gate.note,
+        address: r.address,
+        dualOK: dual,
+        monadscan: { ok: r.scanOK, signal: r.scanSignal, url: r.scanUrl },
+        monadVision: {
+          ok: r.visionOK,
+          signal: r.visionSignal,
+          url: r.visionUrl,
+        },
+        checkedAt: r.checkedAt,
       },
       null,
       2,
     ),
   );
-
-  const hash = await commitTx(cfg, taskId, specHash, evidenceHash, gate.pass);
-  console.log(
-    JSON.stringify(
-      { ok: true, tx: hash, explorer: txUrl(cfg, hash), pending: true },
-      null,
-      2,
-    ),
-  );
 }
 
-async function cmdAccept(flags: Record<string, string | boolean>) {
+async function cmdWatch(flags: Record<string, string | boolean>) {
   const cfg = getConfig();
-  if (!flags.task) throw new Error("Need --task <id>");
-  const taskId = asBytes32(String(flags.task));
-  const evidenceHash = evidenceHashFromFlag(flags);
-  const accepter = privateKeyToAccount(cfg.accepterKey).address;
+  const code = await getCode(cfg, cfg.twin);
+  if (!code || code === "0x") throw new Error(`No code at ${cfg.twin}`);
 
-  console.log(
-    JSON.stringify(
-      {
-        action: "accept",
-        stamp: cfg.stamp,
-        accepter,
-        taskId,
-        evidenceHash,
-        verify: await readVerify(cfg, taskId, evidenceHash),
-      },
-      null,
-      2,
-    ),
-  );
-
-  const { hash, ok } = await acceptTx(cfg, taskId, evidenceHash);
-  const done = await readIsDone(cfg, taskId);
-  console.log(
-    JSON.stringify(
-      {
-        acceptReturned: ok,
-        isDone: done,
-        tx: hash,
-        explorer: txUrl(cfg, hash),
-      },
-      null,
-      2,
-    ),
-  );
-  if (!ok || !done) {
-    console.error("DENIED: evidence mismatch or not done — second principal refused");
-    process.exit(1);
+  if (flags.address) {
+    const target = asAddr(String(flags.address));
+    const hash = await watchOne(cfg, cfg.keyA, target);
+    console.log(`watched ${target}`);
+    console.log(`tx ${txUrl(cfg, hash)}`);
+    return;
   }
+
+  const limit = Number(flags.limit || "5");
+  const rows = await fetchRegistryCsv(cfg.registryCsvUrl);
+  const uniq = uniqueAddresses(rows).slice(0, limit);
+  const targets = uniq.map((u) => asAddr(u.address));
+  const hash = await watchBatch(cfg, cfg.keyA, targets);
+  console.log(`watched ${targets.length} registry addresses`);
+  for (const u of uniq) console.log(`  ${u.address}  ${u.label}`);
+  console.log(`tx ${txUrl(cfg, hash)}`);
 }
 
-async function cmdReject(flags: Record<string, string | boolean>) {
-  const cfg = getConfig();
-  if (!flags.task) throw new Error("Need --task <id>");
-  const taskId = asBytes32(String(flags.task));
-  const reason = asBytes32(String(flags.reason || "rejected"));
-  const hash = await rejectTx(cfg, taskId, reason);
+async function dualReport(cfg: ReturnType<typeof getConfig>, target: Address, r: DualResult) {
+  const payload = evidenceHashPayload(r);
+  const eh = hashEvidence(payload);
+  console.log(`evidenceHash ${eh}`);
+  console.log(`payload ${payload}`);
+
+  // Ensure watched
+  const card = await readCard(cfg, target);
+  if (!card[0]) {
+    const wh = await watchOne(cfg, cfg.keyA, target);
+    console.log(`watch tx ${txUrl(cfg, wh)}`);
+  }
+
+  const ha = await reportOne(cfg, cfg.keyA, target, r.scanOK, r.visionOK, eh);
+  console.log(`report A ${txUrl(cfg, ha)}`);
+  const hb = await reportOne(cfg, cfg.keyB, target, r.scanOK, r.visionOK, eh);
+  console.log(`report B ${txUrl(cfg, hb)}`);
+
+  const after = await readCard(cfg, target);
   console.log(
     JSON.stringify(
-      { ok: true, tx: hash, explorer: txUrl(cfg, hash), isDone: false },
+      {
+        watched: after[0],
+        settled: after[1],
+        scanOK: after[2],
+        visionOK: after[3],
+        dualOK: after[4],
+        checkedAt: Number(after[5]),
+        evidenceHash: after[6],
+        card: addressUrl(cfg, cfg.twin),
+      },
       null,
       2,
     ),
@@ -199,32 +155,81 @@ async function cmdReject(flags: Record<string, string | boolean>) {
 
 async function cmdCheck(flags: Record<string, string | boolean>) {
   const cfg = getConfig();
-  if (!flags.task) throw new Error("Need --task <id>");
-  const taskId = asBytes32(String(flags.task));
-  const done = await readIsDone(cfg, taskId);
-  const pending = await readIsPending(cfg, taskId);
-  let verified: boolean | undefined;
-  if (flags.evidence || flags["evidence-label"]) {
-    verified = await readVerify(cfg, taskId, evidenceHashFromFlag(flags));
-  }
+  const target = asAddr(String(flags.address));
+  const r = await probeDual(target, cfg);
+  printDual(r);
+  await dualReport(cfg, target, r);
+  process.exit(r.scanOK && r.visionOK ? 0 : 1);
+}
+
+async function cmdCard(flags: Record<string, string | boolean>) {
+  const cfg = getConfig();
+  const target = asAddr(String(flags.address));
+  const c = await readCard(cfg, target);
   console.log(
     JSON.stringify(
       {
-        stamp: cfg.stamp,
-        explorer: addressUrl(cfg, cfg.stamp),
-        taskId,
-        isDone: done,
-        isPending: pending,
-        verified,
+        target,
+        watched: c[0],
+        settled: c[1],
+        scanOK: c[2],
+        visionOK: c[3],
+        dualOK: c[4],
+        checkedAt: Number(c[5]),
+        evidenceHash: c[6],
       },
       null,
       2,
     ),
   );
-  if (!done) {
-    console.error("NOT DONE: missing dual-principal accept");
-    process.exit(1);
+}
+
+async function cmdRun(flags: Record<string, string | boolean>) {
+  const cfg = getConfig();
+  const limit = Number(flags.limit || "5");
+  const seed = flags.seed ? asAddr(String(flags.seed)) : null;
+
+  // Always include issue #369 example if mainnet probe
+  const issue369 = "0x93FE94Ad887a1B04DBFf1f736bfcD1698D4cfF66" as Address;
+
+  const rows = await fetchRegistryCsv(cfg.registryCsvUrl);
+  const uniq = uniqueAddresses(rows);
+  console.log(`registry loaded: ${rows.length} rows, ${uniq.length} unique addresses`);
+  console.log(`source: ${cfg.registryCsvUrl}`);
+  console.log(`probe chain ${cfg.probeChainId} scan=${cfg.scanBase}`);
+
+  const pick: Address[] = [];
+  const seen = new Set<string>();
+  const push = (a: Address) => {
+    const k = a.toLowerCase();
+    if (seen.has(k)) return;
+    seen.add(k);
+    pick.push(a);
+  };
+  if (seed) push(seed);
+  push(issue369);
+  for (const u of uniq) {
+    if (pick.length >= limit) break;
+    push(asAddr(u.address));
   }
+
+  console.log(`\nwatching ${pick.length} addresses…`);
+  const wh = await watchBatch(cfg, cfg.keyA, pick);
+  console.log(`watchBatch ${txUrl(cfg, wh)}`);
+
+  for (const target of pick) {
+    console.log(`\n── probe ${target} ──`);
+    try {
+      const r = await probeDual(target, cfg);
+      printDual(r);
+      await dualReport(cfg, target, r);
+      // polite delay for explorers + RPC
+      await Bun.sleep(400);
+    } catch (e) {
+      console.error(`fail ${target}:`, e);
+    }
+  }
+  console.log("\ndone. open dashboard with VITE_TWINCHECK=" + cfg.twin);
 }
 
 async function main() {
@@ -233,10 +238,11 @@ async function main() {
   if (out.help || positionals.length === 0) usage();
   const cmd = positionals[0];
   try {
-    if (cmd === "commit") await cmdCommit(out);
-    else if (cmd === "accept") await cmdAccept(out);
-    else if (cmd === "reject") await cmdReject(out);
+    if (cmd === "probe") await cmdProbe(out);
+    else if (cmd === "watch") await cmdWatch(out);
     else if (cmd === "check") await cmdCheck(out);
+    else if (cmd === "card") await cmdCard(out);
+    else if (cmd === "run") await cmdRun(out);
     else usage();
   } catch (e) {
     console.error(e instanceof Error ? e.message : e);

@@ -1,14 +1,19 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { type Address, type Hex, isAddress, isHex, keccak256, toBytes } from "viem";
+import { type Address, type Hex, isAddress, isHex } from "viem";
 
-export type StampConfig = {
+export type TwinConfig = {
   rpcUrl: string;
   chainId: number;
-  workerKey: Hex;
-  accepterKey: Hex;
-  stamp: Address;
+  keyA: Hex;
+  keyB: Hex;
+  twin: Address;
   explorerBase: string;
+  registryCsvUrl: string;
+  /** Chain id used when probing explorers (mainnet registry → 143). */
+  probeChainId: number;
+  scanBase: string;
+  visionSourcifyBase: string;
 };
 
 function loadEnvFile(path: string): void {
@@ -56,36 +61,43 @@ function asHexKey(name: string, raw: string): Hex {
   return h as Hex;
 }
 
-export function asBytes32(labelOrHex: string): Hex {
-  if (isHex(labelOrHex) && labelOrHex.length === 66) return labelOrHex as Hex;
-  return keccak256(toBytes(labelOrHex));
-}
-
-export function getConfig(): StampConfig {
+export function getConfig(): TwinConfig {
   loadEnv();
-  const workerKey = asHexKey("PRIVATE_KEY", requireEnv("PRIVATE_KEY"));
-  const accepterKey = asHexKey(
+  const keyA = asHexKey("PRIVATE_KEY", requireEnv("PRIVATE_KEY"));
+  const keyB = asHexKey(
     "PRINCIPAL_B_PRIVATE_KEY",
     requireEnv("PRINCIPAL_B_PRIVATE_KEY"),
   );
-  const stamp = (process.env.DONESTAMP || process.env.DONESTAMP_ADDRESS || "") as Address;
-  if (!isAddress(stamp)) {
-    throw new Error("Set DONESTAMP to the deployed DoneStamp address (see DEPLOYMENTS.md).");
+  const twin = (process.env.TWINCHECK || process.env.TWINCHECK_ADDRESS || "") as Address;
+  if (!isAddress(twin)) {
+    throw new Error("Set TWINCHECK to the deployed TwinCheck address.");
   }
+  const probeChainId = Number(process.env.PROBE_CHAIN_ID || "143");
+  const isMainnetProbe = probeChainId === 143;
   return {
     rpcUrl: process.env.MONAD_RPC_URL || "https://testnet-rpc.monad.xyz",
     chainId: Number(process.env.MONAD_CHAIN_ID || "10143"),
-    workerKey,
-    accepterKey,
-    stamp,
+    keyA,
+    keyB,
+    twin,
     explorerBase: process.env.MONAD_EXPLORER || "https://testnet.monadvision.com",
+    registryCsvUrl:
+      process.env.REGISTRY_CSV_URL ||
+      "https://raw.githubusercontent.com/monad-crypto/protocols/refs/heads/main/protocols-mainnet.csv",
+    probeChainId,
+    scanBase:
+      process.env.MONADSCAN_BASE ||
+      (isMainnetProbe ? "https://monadscan.com" : "https://testnet.monadscan.com"),
+    visionSourcifyBase:
+      process.env.VISION_SOURCIFY_BASE ||
+      "https://sourcify-api-monad.blockvision.org/v2/contract",
   };
 }
 
-export function txUrl(cfg: StampConfig, hash: Hex): string {
+export function txUrl(cfg: TwinConfig, hash: Hex): string {
   return `${cfg.explorerBase}/tx/${hash}`;
 }
 
-export function addressUrl(cfg: StampConfig, address: Address): string {
+export function addressUrl(cfg: TwinConfig, address: Address): string {
   return `${cfg.explorerBase}/address/${address}`;
 }

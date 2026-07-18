@@ -1,16 +1,13 @@
 {
-  "name": "donestamp",
-  "version": "0.2.0",
+  "name": "twincheck",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "bin": {
-    "donestamp": "./src/index.ts"
+    "twincheck": "./src/index.ts"
   },
   "scripts": {
     "start": "bun run src/index.ts",
-    "commit": "bun run src/index.ts commit",
-    "accept": "bun run src/index.ts accept",
-    "check": "bun run src/index.ts check",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

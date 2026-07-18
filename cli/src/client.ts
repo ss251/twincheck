@@ -2,137 +2,116 @@ import {
   createPublicClient,
   createWalletClient,
   http,
-  type Account,
-  type Hex,
   type Address,
-  type Chain,
+  type Hex,
+  type PublicClient,
+  type WalletClient,
+  encodeFunctionData,
+  keccak256,
+  toBytes,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { doneStampAbi } from "./abi";
-import type { StampConfig } from "./config";
+import type { TwinConfig } from "./config";
+import { twinAbi } from "./abi";
 
-export const monadTestnet: Chain = {
-  id: 10143,
-  name: "Monad Testnet",
-  nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
-  rpcUrls: { default: { http: ["https://testnet-rpc.monad.xyz"] } },
-  blockExplorers: {
-    default: { name: "MonadVision", url: "https://testnet.monadvision.com" },
-  },
-  testnet: true,
-};
-
-export function makeClients(cfg: StampConfig, pk: Hex) {
-  const account = privateKeyToAccount(pk);
-  const chain: Chain = {
-    ...monadTestnet,
-    id: cfg.chainId,
-    rpcUrls: { default: { http: [cfg.rpcUrl] } },
-  };
-  const publicClient = createPublicClient({ chain, transport: http(cfg.rpcUrl) });
-  const walletClient = createWalletClient({
-    account,
-    chain,
+export function publicClient(cfg: TwinConfig): PublicClient {
+  return createPublicClient({
+    chain: {
+      id: cfg.chainId,
+      name: "Monad Testnet",
+      nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
+      rpcUrls: { default: { http: [cfg.rpcUrl] } },
+    },
     transport: http(cfg.rpcUrl),
   });
-  return { publicClient, walletClient, account, chain };
 }
 
-export async function getCode(cfg: StampConfig, address: Address): Promise<Hex> {
-  const { publicClient } = makeClients(cfg, cfg.workerKey);
-  return publicClient.getCode({ address }) as Promise<Hex>;
-}
-
-export async function readIsDone(cfg: StampConfig, taskId: Hex): Promise<boolean> {
-  const { publicClient } = makeClients(cfg, cfg.workerKey);
-  return publicClient.readContract({
-    address: cfg.stamp,
-    abi: doneStampAbi,
-    functionName: "isDone",
-    args: [taskId],
+export function walletClient(cfg: TwinConfig, key: Hex): WalletClient {
+  const account = privateKeyToAccount(key);
+  return createWalletClient({
+    account,
+    chain: {
+      id: cfg.chainId,
+      name: "Monad Testnet",
+      nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
+      rpcUrls: { default: { http: [cfg.rpcUrl] } },
+    },
+    transport: http(cfg.rpcUrl),
   });
 }
 
-export async function readIsPending(cfg: StampConfig, taskId: Hex): Promise<boolean> {
-  const { publicClient } = makeClients(cfg, cfg.workerKey);
-  return publicClient.readContract({
-    address: cfg.stamp,
-    abi: doneStampAbi,
-    functionName: "isPending",
-    args: [taskId],
+export async function getCode(cfg: TwinConfig, address: Address): Promise<Hex> {
+  return publicClient(cfg).getCode({ address }) as Promise<Hex>;
+}
+
+export async function readCard(cfg: TwinConfig, target: Address) {
+  return publicClient(cfg).readContract({
+    address: cfg.twin,
+    abi: twinAbi,
+    functionName: "getCard",
+    args: [target],
   });
 }
 
-export async function readVerify(
-  cfg: StampConfig,
-  taskId: Hex,
-  evidenceHash: Hex,
-): Promise<boolean> {
-  const { publicClient } = makeClients(cfg, cfg.workerKey);
-  return publicClient.readContract({
-    address: cfg.stamp,
-    abi: doneStampAbi,
-    functionName: "verify",
-    args: [taskId, evidenceHash],
-  });
-}
-
-export async function commitTx(
-  cfg: StampConfig,
-  taskId: Hex,
-  specHash: Hex,
-  evidenceHash: Hex,
-  gatePass: boolean,
+export async function watchOne(
+  cfg: TwinConfig,
+  key: Hex,
+  target: Address,
 ): Promise<Hex> {
-  const { walletClient, publicClient, account } = makeClients(cfg, cfg.workerKey);
-  const hash = await walletClient.writeContract({
-    address: cfg.stamp,
-    abi: doneStampAbi,
-    functionName: "commit",
-    args: [taskId, specHash, evidenceHash, gatePass],
-    account: account as Account,
-    chain: walletClient.chain,
+  const wc = walletClient(cfg, key);
+  const hash = await wc.writeContract({
+    address: cfg.twin,
+    abi: twinAbi,
+    functionName: "watch",
+    args: [target],
+    chain: wc.chain,
+    account: wc.account!,
   });
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
-  if (receipt.status !== "success") throw new Error(`commit failed: ${hash}`);
+  await publicClient(cfg).waitForTransactionReceipt({ hash });
   return hash;
 }
 
-export async function acceptTx(
-  cfg: StampConfig,
-  taskId: Hex,
-  evidenceHash: Hex,
-): Promise<{ hash: Hex; ok: boolean }> {
-  const { walletClient, publicClient, account } = makeClients(cfg, cfg.accepterKey);
-  const { request, result } = await publicClient.simulateContract({
-    address: cfg.stamp,
-    abi: doneStampAbi,
-    functionName: "accept",
-    args: [taskId, evidenceHash],
-    account: account as Account,
-  });
-  const hash = await walletClient.writeContract(request);
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
-  if (receipt.status !== "success") throw new Error(`accept failed: ${hash}`);
-  // re-read isDone for ground truth (result from simulate is the return)
-  const ok = Boolean(result);
-  return { hash, ok };
-}
-
-export async function rejectTx(
-  cfg: StampConfig,
-  taskId: Hex,
-  reason: Hex,
+export async function watchBatch(
+  cfg: TwinConfig,
+  key: Hex,
+  targets: Address[],
 ): Promise<Hex> {
-  const { walletClient, publicClient, account } = makeClients(cfg, cfg.accepterKey);
-  const hash = await walletClient.writeContract({
-    address: cfg.stamp,
-    abi: doneStampAbi,
-    functionName: "reject",
-    args: [taskId, reason],
-    account: account as Account,
-    chain: walletClient.chain,
+  const wc = walletClient(cfg, key);
+  const hash = await wc.writeContract({
+    address: cfg.twin,
+    abi: twinAbi,
+    functionName: "watchBatch",
+    args: [targets],
+    chain: wc.chain,
+    account: wc.account!,
   });
-  await publicClient.waitForTransactionReceipt({ hash });
+  await publicClient(cfg).waitForTransactionReceipt({ hash });
   return hash;
 }
+
+export async function reportOne(
+  cfg: TwinConfig,
+  key: Hex,
+  target: Address,
+  scanOK: boolean,
+  visionOK: boolean,
+  evidenceHash: Hex,
+): Promise<Hex> {
+  const wc = walletClient(cfg, key);
+  const hash = await wc.writeContract({
+    address: cfg.twin,
+    abi: twinAbi,
+    functionName: "report",
+    args: [target, scanOK, visionOK, evidenceHash],
+    chain: wc.chain,
+    account: wc.account!,
+  });
+  await publicClient(cfg).waitForTransactionReceipt({ hash });
+  return hash;
+}
+
+export function hashEvidence(payload: string): Hex {
+  return keccak256(toBytes(payload));
+}
+
+export { encodeFunctionData };
