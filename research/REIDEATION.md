@@ -1,81 +1,81 @@
-# REIDEATION — Monad Spark (FleetMeter is DEAD)
+# REIDEATION — Monad Spark (post alpha-mine)
 
-**Date:** 2026-07-18  
+**Date:** 2026-07-18 (amended: F1 not limited to seeded pains; field alpha required first)  
+**Alpha source:** `research/ALPHA-MINE.md` (native X search, 30d)  
 **Deadline:** 2026-07-19 23:59 UTC  
-**Kill reason for FleetMeter:** the operator already uses **CodexBar** (and related local quota tooling) for usage tracking — the "silent quota death" pitch was manufactured for the hackathon, not a real uncovered itch. F3 fails hard. Do not ship FleetMeter.
 
-**Filters (every candidate must pass all three in writing):**
+**FleetMeter:** DEAD. **F3 fail** — operator already uses **CodexBar** (+ quota-axi) for usage tracking. Pain was manufactured.
+
+### Filter definitions
 
 | Filter | Meaning |
 |--------|---------|
-| **F1 REAL ITCH** | Pain the operator actually felt **this week**, evidenced in the research corpus / OBJECTIVE pains — not invented for the prize. |
-| **F2 MONAD LOAD-BEARING** | Design needs cheap high-frequency blocks **or** fails the "would a database do this?" test with a written answer involving a **genuine second party / trust boundary**. |
-| **F3 NOT ALREADY SOLVED** | Name a real incumbent tool the operator uses and why it does **not** cover this. (CodexBar test.) |
-
-Corpus anchors: `research/BUILD-DECISION.md`, `../monad-spark/research/IDEAS.md` (ProofOfDone / ExpiryKeeper), OBJECTIVE pain list (agents claiming done without proof; silent scheduled-job misses; submission-mechanics traps; faucet captcha friction this week).
+| **F1 REAL ITCH** | Pain the operator **genuinely feels** (this week or ongoing ops). May be seeded pains **or** field alpha that is also his — not invented for the prize. |
+| **F2 MONAD LOAD-BEARING** | Needs cheap high-frequency blocks **or** a written “why not a database” answer with a **genuine second party / trust boundary**. |
+| **F3 NOT ALREADY SOLVED** | Name a real incumbent the operator uses and why it does not cover this. |
 
 ---
 
-## Candidate 1 — DoneStamp (onchain dual-principal completion receipts)
+## Candidate 1 — DoneStamp (dual-principal completion receipts)
 
-**Wedge (candidate):** When an unattended agent says "done," a deterministic gate hashes evidence and a **second principal** must re-run and co-sign onchain — vibes cannot replace proof.
+**Wedge:** When an agent says “done,” a deterministic gate hashes evidence and a **second principal** re-runs and co-signs onchain — authorised is not compliant; vibes cannot replace proof.
 
 | Filter | Score | Written answer |
 |--------|-------|----------------|
-| **F1** | **PASS (9/10)** | THIS WEEK: the whole **pasted-proof discipline** and unattended-loop doctrine exist because agents claim done without independently checkable evidence (`IDEAS.md` #2: "an agent's 'done' is just its word"; OBJECTIVE: "agents claiming done without proof"). Felt continuously in agent fleet ops, not invented for Spark. |
-| **F2** | **PASS (9/10)** | A local DB or markdown log fails because the **worker machine can rewrite its own log**. DoneStamp requires two independent EOAs: **worker** posts `commit(taskId, specHash, evidenceHash, gatePass)`; **accepter** posts `accept` only after re-computing the same hashes. Worker cannot forge accepter's signature; accepter cannot backdate worker's commit. Shared clock is `block.timestamp`. Monad cheap/fast blocks make **per-task receipts free** — high-frequency agent loops need that. |
-| **F3** | **PASS (8/10)** | **Incumbents:** git commits, CI logs, Claude/Codex session transcripts, local pasted-proof files, GitHub PR checks. **Gap:** none are a **cross-principal, tamper-evident, dual-signature completion object** the agent and a skeptic both sign. Git can be force-pushed; local proof files are self-serving; CI is single-org and not the same as "agent claimed done, human/auditor co-signed." CodexBar tracks **usage**, not **completion integrity**. |
+| **F1** | **PASS (10/10)** | **Local:** pasted-proof discipline + unattended loops exist because agents claim done without checkable evidence (`IDEAS.md` #2; this week’s goal-mode work). **Field:** “wallet can prove authorised… cannot prove the agent did what you asked” ([ChiChi](https://x.com/Nnenne070/status/2078152613917233569)); need evals for *completed task* not *looked right* ([MrRuSs3LL](https://x.com/mrru5s3ll/status/2077319339100037160)); approval/finishes UX is top engagement ([Edward Luo](https://x.com/edwardluox/status/2078111197212414447), 2.1k♥). Seed list example + field loudness + operator doctrine = same itch. |
+| **F2** | **PASS (9/10)** | Local DB fails: worker machine rewrites its log. **Worker EOA** commits hashes; **accepter EOA** co-signs only after re-hash. Neither forges the other; `block.timestamp` is shared clock. Monad cheap/fast blocks make per-task receipts free (same gas argument as [SpringX on Monad](https://x.com/MonadCommunity/status/2075137783077937245)). |
+| **F3** | **PASS (8/10)** | **Incumbents:** CodexBar (usage), git, CI, Claude/Codex transcripts, local markdown proofs. **Gap:** none are dual-signature, tamper-evident **completion** objects across principals. CI is single-org; git is force-pushable; CodexBar does not co-sign “done.” Spark **LEASH/Refilr** are spend/gas policy, not completion. |
 
-**1-day ship shape:** one contract (`DoneStamp.sol`), CLI `commit`/`accept`/`check`, dashboard of receipts + allow/deny tape.
+**1-day shape:** already shippable (`DoneStamp.sol` + CLI + dashboard live).
 
 ---
 
 ## Candidate 2 — PulseWatch (onchain heartbeat for silent job death)
 
-**Wedge (candidate):** Scheduled agent jobs must pulse a shared onchain deadline window; a second watcher (or anyone) can mark a miss when the pulse stops.
+**Wedge:** Unattended jobs must pulse a shared onchain deadline; a second watcher marks misses when the pulse stops.
 
 | Filter | Score | Written answer |
 |--------|-------|----------------|
-| **F1** | **PASS (7/10)** | OBJECTIVE lists **silent scheduled-job misses** (nobody notices a keeper/cron that quietly stopped). Real ops pain for unattended loops; weaker "this week" dated anecdote in corpus than ProofOfDone, but explicitly named. |
-| **F2** | **PASS (7/10)** | Job runs on machine A; supervisor on machine B. A's local log saying "still alive" is worthless to B. Shared **deadline + lastPulse** onchain with `block.timestamp` is the neutral clock. Miss events are append-only. Cheap pulses suit Monad. |
-| **F3** | **WEAK (4/10)** | **Incumbents:** healthchecks.io, Dead Man's Snitch, UptimeRobot, launchd/cron mail. **Gap claimed:** multi-agent fleet without another SaaS. **Honest risk:** healthchecks.io already solves "ping or alert" well for most operators — F3 is the soft underbelly. |
+| **F1** | **PASS (6/10)** | Seeded “silent scheduled-job misses”; field: overnight agents still running ([Jeremybtc](https://x.com/Jeremybtc/status/2078072890847875379)). Real but softer than “done lies.” |
+| **F2** | **PASS (7/10)** | Job box A vs supervisor B; shared deadline onchain. |
+| **F3** | **WEAK (4/10)** | **healthchecks.io / Dead Man’s Snitch / UptimeRobot** already solve ping-or-alert for most ops. |
 
 ---
 
-## Candidate 3 — ExpiryScream (perishable-credit dead-man's switch)
+## Candidate 3 — LogRange / indexer pain (Monad eth_getLogs 100-cap)
 
-**Wedge (candidate):** Register AI credit / quota expiry epochs onchain; anyone can poke past threshold to emit a loud Expiring/Expired event.
+**Wedge:** Library/service that pages `eth_getLogs` under Monad’s 100-block limit so dashboards don’t die.
 
 | Filter | Score | Written answer |
 |--------|-------|----------------|
-| **F1** | **PASS (6/10)** | Grok credits expiry fire-drill is in corpus (`IDEAS.md` #3, BUILD-DECISION) — felt this week. But the **actionable** part is "notice expiry," which overlaps tools that already track windows. |
-| **F2** | **FAIL (3/10)** | Payload is mostly an **offchain notification**. A database + cron screams just as loud. Second-party story is thin unless two parties must agree the expiry registry is canonical — forced, not natural. |
-| **F3** | **FAIL (3/10)** | **Incumbents:** CodexBar, quota-axi, calendar reminders, provider dashboards. They already surface remaining credits/windows. This is adjacent to the **killed FleetMeter** pain class. |
+| **F1** | **PASS (8/10)** | **Operator hit THIS WEEK** (dashboard skeptic rejection). Field: page getLogs ranges ([SwiftNodes](https://x.com/swiftnodesio/status/2076889232681881663), [paoloanzn adaptive chunker](https://x.com/paoloanzn/status/2075844274978206118)). |
+| **F2** | **FAIL (2/10)** | Pure client library; **a database/indexer is exactly the solution**. No second-party trust story. |
+| **F3** | **FAIL (3/10)** | The Graph, custom indexers, existing paging snippets. Not Spark “problem YOU have” prize shape. |
 
 ---
 
 ## Explicit rejections
 
-| Idea | Why out |
-|------|---------|
-| **FleetMeter / quota commons** | **F3 fail.** Operator uses **CodexBar** (+ quota-axi) for usage tracking. Pain was manufactured. |
-| **ExpiryScream as primary entry** | F2/F3 fail (offchain notify + already covered by dashboards). |
-| **PulseWatch as primary** | Survivable but F3 weaker than DoneStamp; healthchecks.io is a real incumbent. |
+| Idea | Why |
+|------|-----|
+| **FleetMeter** | F3 CodexBar |
+| **Agent payments / identity rails** | Field promo-heavy; multi-week; not elegant 1d |
+| **Approval notch UX only** | Huge engagement but offchain UX; F2 fails |
 
 ---
 
-## PICK
+## PICK (post alpha-mine)
 
-### **DoneStamp**
+### **DoneStamp** — unchanged after field merge
 
 **One-sentence wedge:**
 
-> **"Every agent 'done' is a dual-principal onchain receipt — the worker posts gate hashes, a second accepter re-runs and co-signs, so vibes cannot replace proof."**
+> **"Every agent 'done' is a dual-principal onchain receipt — the worker posts gate hashes, a second accepter re-runs and co-signs, so authorised is not compliant and vibes cannot replace proof."**
 
-**Demo spine:** (1) clean allow — worker commit + matching accept → `isDone=true`; (2) loud deny — wrong evidence hash on accept → Denied / not done; two independent signers visible on explorer.
+**Why it wins after ALPHA-MINE:** field’s loudest agent gap (completion proof + approval) **is** the operator’s pasted-proof itch; Spark gallery has LEASH/Refilr but not dual-principal done; F2 remains two real EOAs; F3 CodexBar orthogonal.
 
-**Why this wins F1×F2×F3:** strongest this-week authenticity (pasted-proof / agents-lie-about-done), onchain is load-bearing via **two real EOAs**, not a self-log, and CodexBar does not touch completion integrity.
+**Status:** Already built end-to-end on Monad testnet (`0x6e234b…31C8`, verified, CLI allow/deny, dashboard live with paged logs). Alpha-mine **reconfirms** the pick rather than replacing it.
 
 ---
 
-*Surfaced for veto before product contract/UI build. If no veto in-session, implementer proceeds to ship DoneStamp end-to-end.*
+*Surfaced for veto: if veto, rebuild from Candidate 2 only if F3 is accepted as “healthchecks not multi-party”; do not ship Candidate 3.*
