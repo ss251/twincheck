@@ -1,0 +1,22 @@
+{
+  "name": "fleetmeter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "fleetmeter": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "post": "bun run src/index.ts post",
+    "gate": "bun run src/index.ts gate",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "viem": "^2.31.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.3"
+  }
+}
