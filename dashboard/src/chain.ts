@@ -13,9 +13,21 @@ export const MONAD_RPC =
 export const EXPLORER =
   import.meta.env.VITE_MONAD_EXPLORER || "https://testnet.monadvision.com";
 
-export const STAMP = (import.meta.env.VITE_DONESTAMP ||
-  import.meta.env.VITE_FLEETLEDGER ||
-  "") as Address;
+/** Deployed DoneStamp on Monad testnet (DEPLOYMENTS.md). Env overrides when set. */
+const DEFAULT_STAMP = "0x6e234b4839641158B4E88Db59037B178BfcC31C8";
+
+function resolveStamp(): Address {
+  const raw = (
+    import.meta.env.VITE_DONESTAMP ||
+    import.meta.env.VITE_FLEETLEDGER ||
+    DEFAULT_STAMP
+  )
+    .toString()
+    .trim();
+  return raw as Address;
+}
+
+export const STAMP = resolveStamp();
 
 export const client = createPublicClient({
   chain: {
@@ -125,6 +137,50 @@ export function explorerTx(hash: string): string {
 
 export function explorerAddr(addr: string): string {
   return `${EXPLORER}/address/${addr}`;
+}
+
+/** Monad public RPC caps eth_getLogs to a 100-block range (error -32614). */
+export const LOG_PAGE_SIZE = 100n;
+
+/**
+ * Page eth_getLogs in ≤100-block windows from `toBlock` backward.
+ * Batches pages (parallel within batch) for acceptable UI latency under Monad's
+ * 100-block eth_getLogs limit.
+ */
+export async function getAllLogsPaged(opts: {
+  address: Address;
+  toBlock: bigint;
+  /** Default 20 → 2_000 blocks (~13 min on 400ms blocks) — enough for demo receipts. */
+  maxPages?: number;
+  concurrency?: number;
+}): Promise<Log[]> {
+  const maxPages = opts.maxPages ?? 20;
+  const concurrency = opts.concurrency ?? 5;
+  const ranges: { from: bigint; to: bigint }[] = [];
+  let to = opts.toBlock;
+  for (let i = 0; i < maxPages && to >= 0n; i++) {
+    const span = to + 1n < LOG_PAGE_SIZE ? to + 1n : LOG_PAGE_SIZE;
+    const from = to + 1n > span ? to + 1n - span : 0n;
+    ranges.push({ from, to });
+    if (from === 0n) break;
+    to = from - 1n;
+  }
+
+  const out: Log[] = [];
+  for (let i = 0; i < ranges.length; i += concurrency) {
+    const batch = ranges.slice(i, i + concurrency);
+    const chunks = await Promise.all(
+      batch.map(({ from, to: t }) =>
+        client.getLogs({
+          address: opts.address,
+          fromBlock: from,
+          toBlock: t,
+        }),
+      ),
+    );
+    for (const chunk of chunks) out.push(...chunk);
+  }
+  return out;
 }
 
 export function logToEvent(log: Log & { args?: any; eventName?: string }): ChainEvent | null {

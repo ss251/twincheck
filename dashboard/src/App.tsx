@@ -8,13 +8,76 @@ import {
   acceptedEvent,
   rejectedEvent,
   deniedEvent,
-  logToEvent,
+  getAllLogsPaged,
   type ChainEvent,
   shortAddr,
   shortBytes,
   explorerTx,
   explorerAddr,
 } from "./chain";
+import { type Log, decodeEventLog, getEventSelector, type Hex } from "viem";
+
+const EVENT_BY_NAME = {
+  Committed: committedEvent,
+  Accepted: acceptedEvent,
+  Rejected: rejectedEvent,
+  Denied: deniedEvent,
+} as const;
+
+function decodeLog(log: Log, eventName: keyof typeof EVENT_BY_NAME): ChainEvent | null {
+  try {
+    const decoded = decodeEventLog({
+      abi: [EVENT_BY_NAME[eventName]],
+      data: log.data,
+      topics: log.topics as [Hex, ...Hex[]],
+    });
+    const args = decoded.args as any;
+    const tx = log.transactionHash as Hex;
+    const blockNumber = log.blockNumber ?? 0n;
+    if (eventName === "Committed") {
+      return {
+        kind: "Committed",
+        taskId: args.taskId,
+        worker: args.worker,
+        evidenceHash: args.evidenceHash,
+        gatePass: args.gatePass,
+        tx,
+        blockNumber,
+      };
+    }
+    if (eventName === "Accepted") {
+      return {
+        kind: "Accepted",
+        taskId: args.taskId,
+        accepter: args.accepter,
+        evidenceHash: args.evidenceHash,
+        tx,
+        blockNumber,
+      };
+    }
+    if (eventName === "Rejected") {
+      return {
+        kind: "Rejected",
+        taskId: args.taskId,
+        accepter: args.accepter,
+        reason: args.reason,
+        tx,
+        blockNumber,
+      };
+    }
+    return {
+      kind: "Denied",
+      taskId: args.taskId,
+      caller: args.caller,
+      providedHash: args.providedHash,
+      expectedHash: args.expectedHash,
+      tx,
+      blockNumber,
+    };
+  } catch {
+    return null;
+  }
+}
 
 export function App() {
   const [error, setError] = useState<string | null>(null);
@@ -28,7 +91,9 @@ export function App() {
     rejected: 0,
   });
 
-  const configured = Boolean(STAMP && STAMP.startsWith("0x") && STAMP.length === 42);
+  const configured = Boolean(
+    STAMP && /^0x[0-9a-fA-F]{40}$/.test(STAMP.trim()),
+  );
 
   const refresh = useCallback(async () => {
     if (!configured) {
@@ -46,28 +111,49 @@ export function App() {
       }
       const bn = await client.getBlockNumber();
       setBlock(bn);
-      const fromBlock = bn > 120_000n ? bn - 120_000n : 0n;
 
-      const [commits, accepts, rejects, denieds] = await Promise.all([
-        client.getLogs({ address: STAMP, event: committedEvent, fromBlock, toBlock: bn }),
-        client.getLogs({ address: STAMP, event: acceptedEvent, fromBlock, toBlock: bn }),
-        client.getLogs({ address: STAMP, event: rejectedEvent, fromBlock, toBlock: bn }),
-        client.getLogs({ address: STAMP, event: deniedEvent, fromBlock, toBlock: bn }),
-      ]);
+      // Monad public RPC: eth_getLogs limited to 100-block ranges — page ≤100 windows.
+      // 20 * 100 blocks, 5 concurrent pages — stays under Monad's 100-block eth_getLogs limit
+      const raw = await getAllLogsPaged({
+        address: STAMP,
+        toBlock: bn,
+        maxPages: 20,
+        concurrency: 5,
+      });
+      const sig = {
+        Committed: getEventSelector(committedEvent),
+        Accepted: getEventSelector(acceptedEvent),
+        Rejected: getEventSelector(rejectedEvent),
+        Denied: getEventSelector(deniedEvent),
+      };
 
       const merged: ChainEvent[] = [];
-      for (const log of [...commits, ...accepts, ...rejects, ...denieds]) {
-        const ev = logToEvent(log as any);
-        if (ev) merged.push(ev);
+      let committed = 0;
+      let accepted = 0;
+      let rejected = 0;
+      let denied = 0;
+
+      for (const log of raw) {
+        const topic0 = log.topics[0];
+        let eventName: keyof typeof EVENT_BY_NAME | undefined;
+        if (topic0 === sig.Committed) eventName = "Committed";
+        else if (topic0 === sig.Accepted) eventName = "Accepted";
+        else if (topic0 === sig.Rejected) eventName = "Rejected";
+        else if (topic0 === sig.Denied) eventName = "Denied";
+        if (!eventName) continue;
+
+        const decoded = decodeLog(log, eventName);
+        if (!decoded) continue;
+        if (eventName === "Committed") committed++;
+        if (eventName === "Accepted") accepted++;
+        if (eventName === "Rejected") rejected++;
+        if (eventName === "Denied") denied++;
+        merged.push(decoded);
       }
+
       merged.sort((x, y) => (x.blockNumber < y.blockNumber ? 1 : -1));
       setEvents(merged.slice(0, 100));
-      setStats({
-        committed: commits.length,
-        accepted: accepts.length,
-        denied: denieds.length,
-        rejected: rejects.length,
-      });
+      setStats({ committed, accepted, denied, rejected });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
