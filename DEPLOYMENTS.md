@@ -35,3 +35,14 @@ forge verify-contract $FLEETLEDGER FleetLedger \
 ```
 
 Update this file with address + explorer URL immediately after success.
+
+### Dashboard (hosted)
+
+| Field | Value |
+|-------|--------|
+| Public URL | https://dashboard-pink-one-12.vercel.app |
+| Note | Built from `dashboard/`; awaits `VITE_FLEETLEDGER` env for live seats/events |
+
+## Deviations (implementer)
+
+- D2 blocked on MON: deployer `0xB99348aCC284E70cD832Fec09a0fC4A88879b5ac` balance 0; `forge create` → `Signer had insufficient balance`. Official faucet bot-gated; Alchemy eligibility not met by fresh key.

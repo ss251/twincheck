@@ -7,7 +7,7 @@ Fill after D2–D4 land; placeholders marked **TODO** are intentionally human/li
 | **Project name** | FleetMeter |
 | **One-liner** | Onchain shared-pool quota ledger for multi-provider AI agent fleets — silent quota death becomes a loud refusal. |
 | **Public GitHub repo** | **TODO** — push this repo and paste URL |
-| **Hosted web demo URL** | **TODO** — Vercel (or similar) URL for `dashboard/` |
+| **Hosted web demo URL** | https://dashboard-pink-one-12.vercel.app (set `VITE_FLEETLEDGER` after D2 deploy) |
 | **Contract address (Monad testnet)** | See `DEPLOYMENTS.md` — **TODO** until MON deploy |
 | **Explorer link** | See `DEPLOYMENTS.md` |
 | **Demo video (≤3 min)** | **TODO** — human records from `DEMO.md` shot list |
