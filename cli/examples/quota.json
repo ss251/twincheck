@@ -1,9 +1,0 @@
-{
-  "provider": "stub",
-  "windowId": "demo-session",
-  "percentUsed": 42,
-  "percentRemaining": 58,
-  "units": 420000,
-  "receiptLabel": "documented-json-stub",
-  "_comment": "Used when quota-axi is unavailable. units are abstract micro-USD."
-}

@@ -9,7 +9,7 @@
  *   twincheck card    — read settled card from chain
  *   twincheck run     — sample registry, watch, dual-report (demo path)
  */
-import type { Address, Hex } from "viem";
+import type { Address } from "viem";
 import { getConfig, loadEnv, txUrl, addressUrl } from "./config";
 import {
   getCode,

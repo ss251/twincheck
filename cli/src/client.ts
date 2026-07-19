@@ -6,7 +6,6 @@ import {
   type Hex,
   type PublicClient,
   type WalletClient,
-  encodeFunctionData,
   keccak256,
   toBytes,
 } from "viem";
@@ -113,5 +112,3 @@ export async function reportOne(
 export function hashEvidence(payload: string): Hex {
   return keccak256(toBytes(payload));
 }
-
-export { encodeFunctionData };
