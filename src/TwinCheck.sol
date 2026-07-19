@@ -173,7 +173,17 @@ contract TwinCheck {
         if (!oa.exists || !ob.exists) return;
         if (oa.scanOK != ob.scanOK || oa.visionOK != ob.visionOK) return;
 
-        _settle(target, oa.scanOK, oa.visionOK, oa.evidenceHash);
+        // Bind BOTH principals' evidence into the settled commitment so the dual
+        // card represents a genuine consensus, not just attestorA's evidence.
+        bytes32 dualEvidence = keccak256(abi.encode(oa.evidenceHash, ob.evidenceHash));
+        _settle(target, oa.scanOK, oa.visionOK, dualEvidence);
+
+        // Consume both observations. Each settlement must be backed by a FRESH
+        // dual report from both principals; without this a single attestor could
+        // unilaterally re-settle (and re-emit DualStatusSettled/Pulse) forever by
+        // replaying the counterparty's one-time stale observation.
+        delete reports[target][attestorA];
+        delete reports[target][attestorB];
     }
 
     function _settle(address target, bool scanOK, bool visionOK, bytes32 evidenceHash) internal {
