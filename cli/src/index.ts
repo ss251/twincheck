@@ -21,6 +21,7 @@ import {
 } from "./client";
 import {
   evidenceHashPayload,
+  hasProbeError,
   probeDual,
   type DualResult,
 } from "./explorers";
@@ -69,19 +70,29 @@ async function cmdProbe(flags: Record<string, string | boolean>) {
   const address = asAddr(String(flags.address));
   const r = await probeDual(address, cfg);
   printDual(r);
+  // exit 0 = dual verified, 1 = genuinely not dual-verified, 2 = indeterminate
+  if (hasProbeError(r)) process.exit(2);
   process.exit(r.scanOK && r.visionOK ? 0 : 1);
 }
 
-function printDual(r: DualResult) {
-  const dual = r.scanOK && r.visionOK;
+function printDual(r: DualResult, label?: string) {
+  const dual = !hasProbeError(r) && r.scanOK && r.visionOK;
   console.log(
     JSON.stringify(
       {
+        ...(label ? { observer: label } : {}),
         address: r.address,
         dualOK: dual,
-        monadscan: { ok: r.scanOK, signal: r.scanSignal, url: r.scanUrl },
+        indeterminate: hasProbeError(r) || undefined,
+        monadscan: {
+          ok: r.scanOK,
+          error: r.scanError || undefined,
+          signal: r.scanSignal,
+          url: r.scanUrl,
+        },
         monadVision: {
           ok: r.visionOK,
+          error: r.visionError || undefined,
           signal: r.visionSignal,
           url: r.visionUrl,
         },
@@ -117,6 +128,13 @@ async function cmdWatch(flags: Record<string, string | boolean>) {
 }
 
 async function dualReport(cfg: ReturnType<typeof getConfig>, target: Address, r: DualResult) {
+  if (hasProbeError(r)) {
+    throw new Error(
+      `refusing to attest ${target}: indeterminate probe ` +
+        `(monadscan=${r.scanSignal}, monadVision=${r.visionSignal}). ` +
+        `Transient explorer failures must not be recorded on-chain as "unverified".`,
+    );
+  }
   const payload = evidenceHashPayload(r);
   const eh = hashEvidence(payload);
   console.log(`evidenceHash ${eh}`);
@@ -158,6 +176,12 @@ async function cmdCheck(flags: Record<string, string | boolean>) {
   const target = asAddr(String(flags.address));
   const r = await probeDual(target, cfg);
   printDual(r);
+  if (hasProbeError(r)) {
+    console.error(
+      `not attesting: indeterminate probe (monadscan=${r.scanSignal}, monadVision=${r.visionSignal})`,
+    );
+    process.exit(2);
+  }
   await dualReport(cfg, target, r);
   process.exit(r.scanOK && r.visionOK ? 0 : 1);
 }
@@ -217,6 +241,7 @@ async function cmdRun(flags: Record<string, string | boolean>) {
   const wh = await watchBatch(cfg, cfg.keyA, pick);
   console.log(`watchBatch ${txUrl(cfg, wh)}`);
 
+  let failures = 0;
   for (const target of pick) {
     console.log(`\n── probe ${target} ──`);
     try {
@@ -226,10 +251,15 @@ async function cmdRun(flags: Record<string, string | boolean>) {
       // polite delay for explorers + RPC
       await Bun.sleep(400);
     } catch (e) {
-      console.error(`fail ${target}:`, e);
+      failures++;
+      console.error(`fail ${target}:`, e instanceof Error ? e.message : e);
     }
   }
   console.log("\ndone. open dashboard with VITE_TWINCHECK=" + cfg.twin);
+  if (failures > 0) {
+    console.error(`${failures}/${pick.length} addresses failed — exiting non-zero`);
+    process.exit(1);
+  }
 }
 
 async function main() {

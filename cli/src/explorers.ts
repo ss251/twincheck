@@ -2,12 +2,32 @@
  * Live dual-explorer probes — ZERO MOCKS.
  * - MonadVision path: BlockVision Sourcify API (match field)
  * - Monadscan path: public HTML meta "Contract: Verified|Unverified"
+ *
+ * Every probe outcome carries an `error` flag that separates two very
+ * different worlds:
+ *   error=false, ok=false → the explorer genuinely says "unverified"
+ *   error=true            → we could not get a trustworthy answer
+ *                           (timeout, 429, 5xx, network failure, layout drift)
+ * Error-class outcomes must NEVER be attested on-chain as "unverified".
  */
+
+export type ProbeOutcome = {
+  /** True when the explorer says the source is verified. */
+  ok: boolean;
+  /**
+   * True when the probe result is indeterminate (transport failure, rate
+   * limit, server error, unparseable page). `ok` is meaningless when set.
+   */
+  error: boolean;
+  signal: string;
+};
 
 export type DualResult = {
   address: string;
   scanOK: boolean;
   visionOK: boolean;
+  scanError: boolean;
+  visionError: boolean;
   scanSignal: string;
   visionSignal: string;
   scanUrl: string;
@@ -15,66 +35,139 @@ export type DualResult = {
   checkedAt: string;
 };
 
-export async function probeVision(
-  address: string,
-  chainId: number,
-  base: string,
-): Promise<{ ok: boolean; signal: string }> {
-  const url = `${base.replace(/\/$/, "")}/${chainId}/${address}`;
-  const res = await fetch(url, {
-    headers: { accept: "application/json", "user-agent": "twincheck/1.0" },
-  });
-  if (!res.ok) {
-    return { ok: false, signal: `http_${res.status}` };
+export const PROBE_TIMEOUT_MS = 8000;
+export const PROBE_MAX_ATTEMPTS = 3;
+
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+
+export function isRetryableStatus(status: number): boolean {
+  return RETRYABLE_STATUS.has(status);
+}
+
+/** Exponential backoff with jitter: 400ms, 800ms (+0–250ms jitter). */
+export function backoffMs(attempt: number, jitter = Math.random()): number {
+  return 400 * 2 ** (attempt - 1) + Math.floor(jitter * 250);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Fetch with per-attempt timeout and retry on transient failures.
+ * Returns the terminal Response, or a transport-level failure signal.
+ */
+export async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+): Promise<{ res: Response | null; failSignal: string }> {
+  let failSignal = "network_error";
+  for (let attempt = 1; attempt <= PROBE_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 1) await sleep(backoffMs(attempt - 1));
+    try {
+      const res = await fetch(url, {
+        ...init,
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      });
+      if (isRetryableStatus(res.status)) {
+        failSignal = `http_${res.status}`;
+        continue;
+      }
+      return { res, failSignal: "" };
+    } catch (e) {
+      failSignal =
+        e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")
+          ? "timeout"
+          : "network_error";
+    }
   }
-  const body = (await res.json()) as {
-    match?: string | null;
-    runtimeMatch?: string | null;
-  };
-  const match = body.match || body.runtimeMatch || null;
+  return { res: null, failSignal };
+}
+
+/**
+ * Classify a Sourcify-API response. Pure — unit-testable.
+ * 404 from Sourcify means "no match found" → a genuine unverified signal.
+ */
+export function classifyVisionResponse(
+  status: number,
+  body: unknown,
+): ProbeOutcome {
+  if (status === 404) return { ok: false, error: false, signal: "unverified" };
+  if (status < 200 || status >= 300) {
+    return { ok: false, error: true, signal: `http_${status}` };
+  }
+  const b = body as { match?: string | null; runtimeMatch?: string | null } | null;
+  if (!b || typeof b !== "object") {
+    return { ok: false, error: true, signal: "bad_json" };
+  }
+  const match = b.match || b.runtimeMatch || null;
   const ok =
     match === "exact_match" ||
     match === "match" ||
     match === "partial_match" ||
     Boolean(match && match !== "null");
-  return { ok, signal: match ? String(match) : "unverified" };
+  return { ok, error: false, signal: match ? String(match) : "unverified" };
+}
+
+/**
+ * Classify a Monadscan (etherscan-family) address page. Pure — unit-testable.
+ * A page we cannot parse is an ERROR (layout drift / challenge page), never
+ * a genuine "unverified" — attesting on it would be dishonest.
+ */
+export function classifyScanResponse(status: number, html: string): ProbeOutcome {
+  if (status < 200 || status >= 300) {
+    return { ok: false, error: true, signal: `http_${status}` };
+  }
+  const meta =
+    html.match(/content="Contract:\s*(Verified|Unverified)[^"]*"/i) ||
+    html.match(/name="Description"\s+content="Contract:\s*(Verified|Unverified)/i);
+  if (meta) {
+    const s = meta[1].toLowerCase();
+    return { ok: s === "verified", error: false, signal: s };
+  }
+  if (/Source Code Verified/i.test(html) || /Exact Match/i.test(html)) {
+    return { ok: true, error: false, signal: "source_code_verified" };
+  }
+  if (/Verify and Publish/i.test(html) && /contract creator/i.test(html)) {
+    return { ok: false, error: false, signal: "unverified_cta" };
+  }
+  return { ok: false, error: true, signal: "unparseable_page" };
+}
+
+export async function probeVision(
+  address: string,
+  chainId: number,
+  base: string,
+): Promise<ProbeOutcome> {
+  const url = `${base.replace(/\/$/, "")}/${chainId}/${address}`;
+  const { res, failSignal } = await fetchWithRetry(url, {
+    headers: { accept: "application/json", "user-agent": "twincheck/1.0" },
+  });
+  if (!res) return { ok: false, error: true, signal: failSignal };
+  if (res.status === 404) return { ok: false, error: false, signal: "unverified" };
+  if (!res.ok) return { ok: false, error: true, signal: `http_${res.status}` };
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return { ok: false, error: true, signal: "bad_json" };
+  }
+  return classifyVisionResponse(res.status, body);
 }
 
 export async function probeScan(
   address: string,
   scanBase: string,
-): Promise<{ ok: boolean; signal: string }> {
+): Promise<ProbeOutcome> {
   const url = `${scanBase.replace(/\/$/, "")}/address/${address}`;
-  const res = await fetch(url, {
+  const { res, failSignal } = await fetchWithRetry(url, {
     headers: {
       accept: "text/html",
       "user-agent":
         "Mozilla/5.0 (compatible; TwinCheck/1.0; +https://github.com/monad-crypto/protocols/issues/369)",
     },
   });
-  if (!res.ok) {
-    return { ok: false, signal: `http_${res.status}` };
-  }
-  const html = await res.text();
-  // Etherscan-family explorers expose status in og:description / meta Description
-  const meta =
-    html.match(
-      /content="Contract:\s*(Verified|Unverified)[^"]*"/i,
-    ) ||
-    html.match(
-      /name="Description"\s+content="Contract:\s*(Verified|Unverified)/i,
-    );
-  if (meta) {
-    const status = meta[1].toLowerCase();
-    return { ok: status === "verified", signal: status };
-  }
-  if (/Source Code Verified/i.test(html) || /Exact Match/i.test(html)) {
-    return { ok: true, signal: "source_code_verified" };
-  }
-  if (/Verify and Publish/i.test(html) && /contract creator/i.test(html)) {
-    return { ok: false, signal: "unverified_cta" };
-  }
-  return { ok: false, signal: "unknown" };
+  if (!res) return { ok: false, error: true, signal: failSignal };
+  const html = res.ok ? await res.text() : "";
+  return classifyScanResponse(res.status, html);
 }
 
 export async function probeDual(
@@ -94,12 +187,19 @@ export async function probeDual(
     address,
     scanOK: scan.ok,
     visionOK: vision.ok,
+    scanError: scan.error,
+    visionError: vision.error,
     scanSignal: scan.signal,
     visionSignal: vision.signal,
     scanUrl: `${opts.scanBase.replace(/\/$/, "")}/address/${address}`,
     visionUrl: `sourcify://${opts.probeChainId}/${address}`,
     checkedAt,
   };
+}
+
+/** True when either explorer probe was indeterminate — unsafe to attest. */
+export function hasProbeError(r: DualResult): boolean {
+  return r.scanError || r.visionError;
 }
 
 export function evidenceHashPayload(r: DualResult): string {

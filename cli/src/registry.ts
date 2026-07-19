@@ -10,6 +10,7 @@ export type RegistryRow = {
 export async function fetchRegistryCsv(url: string): Promise<RegistryRow[]> {
   const res = await fetch(url, {
     headers: { "user-agent": "twincheck/1.0" },
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`Registry fetch failed ${res.status}: ${url}`);
   const text = await res.text();
