@@ -76,3 +76,7 @@ twincheck card --address 0x…
 ## Spark submission
 
 See `submission.md` and `DEMO.md`. Axis: elegant solution to a real ecosystem problem (**#369**).
+
+## License
+
+[MIT](LICENSE).
