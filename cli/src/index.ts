@@ -127,19 +127,26 @@ async function cmdWatch(flags: Record<string, string | boolean>) {
   console.log(`tx ${txUrl(cfg, hash)}`);
 }
 
-async function dualReport(cfg: ReturnType<typeof getConfig>, target: Address, r: DualResult) {
-  if (hasProbeError(r)) {
-    throw new Error(
-      `refusing to attest ${target}: indeterminate probe ` +
-        `(monadscan=${r.scanSignal}, monadVision=${r.visionSignal}). ` +
-        `Transient explorer failures must not be recorded on-chain as "unverified".`,
-    );
-  }
-  const payload = evidenceHashPayload(r);
-  const eh = hashEvidence(payload);
-  console.log(`evidenceHash ${eh}`);
-  console.log(`payload ${payload}`);
+type DualReportOutcome = {
+  rA: DualResult;
+  rB: DualResult;
+  reportedA: boolean;
+  reportedB: boolean;
+  settled: boolean;
+  dualOK: boolean;
+};
 
+/**
+ * Dual-principal attestation with INDEPENDENT measurements: each principal
+ * runs its own explorer probe and signs its own observation. The contract
+ * settles only when both independently-observed bit sets match (and consumes
+ * both observations — see TwinCheck.report). One shared measurement signed
+ * twice would make the second signature meaningless.
+ */
+async function dualReport(
+  cfg: ReturnType<typeof getConfig>,
+  target: Address,
+): Promise<DualReportOutcome> {
   // Ensure watched
   const card = await readCard(cfg, target);
   if (!card[0]) {
@@ -147,10 +154,47 @@ async function dualReport(cfg: ReturnType<typeof getConfig>, target: Address, r:
     console.log(`watch tx ${txUrl(cfg, wh)}`);
   }
 
-  const ha = await reportOne(cfg, cfg.keyA, target, r.scanOK, r.visionOK, eh);
-  console.log(`report A ${txUrl(cfg, ha)}`);
-  const hb = await reportOne(cfg, cfg.keyB, target, r.scanOK, r.visionOK, eh);
-  console.log(`report B ${txUrl(cfg, hb)}`);
+  const principals = [
+    { label: "A", key: cfg.keyA },
+    { label: "B", key: cfg.keyB },
+  ] as const;
+
+  const results: DualResult[] = [];
+  const reported: boolean[] = [];
+  for (const p of principals) {
+    const r = await probeDual(target, cfg);
+    printDual(r, `principal ${p.label}`);
+    results.push(r);
+    if (hasProbeError(r)) {
+      console.error(
+        `principal ${p.label}: refusing to attest ${target} — indeterminate probe ` +
+          `(monadscan=${r.scanSignal}, monadVision=${r.visionSignal})`,
+      );
+      reported.push(false);
+      continue;
+    }
+    const payload = evidenceHashPayload(r);
+    const eh = hashEvidence(payload);
+    console.log(`principal ${p.label} evidenceHash ${eh}`);
+    console.log(`principal ${p.label} payload ${payload}`);
+    const h = await reportOne(cfg, p.key, target, r.scanOK, r.visionOK, eh);
+    console.log(`report ${p.label} ${txUrl(cfg, h)}`);
+    reported.push(true);
+  }
+
+  if (!reported[0] && !reported[1]) {
+    throw new Error(
+      `no attestation for ${target}: both principals had indeterminate probes. ` +
+        `Transient explorer failures must not be recorded on-chain as "unverified".`,
+    );
+  }
+  const [rA, rB] = results;
+  if (reported[0] && reported[1] && (rA.scanOK !== rB.scanOK || rA.visionOK !== rB.visionOK)) {
+    console.error(
+      `principals disagree on ${target} (A: scan=${rA.scanOK}/vision=${rA.visionOK}, ` +
+        `B: scan=${rB.scanOK}/vision=${rB.visionOK}) — card stays unsettled until they agree`,
+    );
+  }
 
   const after = await readCard(cfg, target);
   console.log(
@@ -169,21 +213,25 @@ async function dualReport(cfg: ReturnType<typeof getConfig>, target: Address, r:
       2,
     ),
   );
+  return {
+    rA,
+    rB,
+    reportedA: reported[0],
+    reportedB: reported[1],
+    settled: Boolean(after[1]),
+    dualOK: Boolean(after[4]),
+  };
 }
 
 async function cmdCheck(flags: Record<string, string | boolean>) {
   const cfg = getConfig();
   const target = asAddr(String(flags.address));
-  const r = await probeDual(target, cfg);
-  printDual(r);
-  if (hasProbeError(r)) {
-    console.error(
-      `not attesting: indeterminate probe (monadscan=${r.scanSignal}, monadVision=${r.visionSignal})`,
-    );
-    process.exit(2);
-  }
-  await dualReport(cfg, target, r);
-  process.exit(r.scanOK && r.visionOK ? 0 : 1);
+  // Each principal probes AND signs independently inside dualReport.
+  const out = await dualReport(cfg, target);
+  // exit 0 = settled dual-verified, 1 = determinate but not dual-verified,
+  // 2 = at least one principal could not get a trustworthy answer
+  if (!out.reportedA || !out.reportedB) process.exit(2);
+  process.exit(out.dualOK ? 0 : 1);
 }
 
 async function cmdCard(flags: Record<string, string | boolean>) {
@@ -243,11 +291,10 @@ async function cmdRun(flags: Record<string, string | boolean>) {
 
   let failures = 0;
   for (const target of pick) {
-    console.log(`\n── probe ${target} ──`);
+    console.log(`\n── check ${target} ──`);
     try {
-      const r = await probeDual(target, cfg);
-      printDual(r);
-      await dualReport(cfg, target, r);
+      const out = await dualReport(cfg, target);
+      if (!out.reportedA || !out.reportedB) failures++;
       // polite delay for explorers + RPC
       await Bun.sleep(400);
     } catch (e) {
