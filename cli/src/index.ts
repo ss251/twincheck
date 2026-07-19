@@ -111,6 +111,13 @@ async function cmdWatch(flags: Record<string, string | boolean>) {
 
   if (flags.address) {
     const target = asAddr(String(flags.address));
+    // TwinCheck.watch reverts AlreadyWatched — pre-check instead of burning
+    // gas on a guaranteed revert (same guard dualReport already uses).
+    const card = await readCard(cfg, target);
+    if (card[0]) {
+      console.log(`already watched ${target} — nothing to do`);
+      return;
+    }
     const hash = await watchOne(cfg, cfg.keyA, target);
     console.log(`watched ${target}`);
     console.log(`tx ${txUrl(cfg, hash)}`);
