@@ -17,6 +17,7 @@
 | Address | [`0x44071F6881ae0F49dD466198dA2BFe8895D8D72C`](https://testnet.monadvision.com/address/0x44071F6881ae0F49dD466198dA2BFe8895D8D72C) |
 | Attestor A | `0xB99348aCC284E70cD832Fec09a0fC4A88879b5ac` |
 | Attestor B | `0xe6781A81704D9eaCe07AAc3c22D5bBC30C90417B` |
+| Deploy block | `46027838` |
 | Deploy script | `script/DeployTwinCheck.s.sol` |
 | Broadcast | `broadcast/DeployTwinCheck.s.sol/10143/run-latest.json` |
 | Vision source | **exact_match** via Sourcify (`sourcify-api-monad.blockvision.org`) |

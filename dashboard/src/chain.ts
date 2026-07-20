@@ -171,9 +171,8 @@ export const LOG_PAGE_SIZE = 100n;
 export const REORG_OVERLAP_BLOCKS = 64n;
 
 /**
- * Block the TwinCheck contract was deployed at (from the forge broadcast,
- * broadcast/DeployTwinCheck.s.sol/10143/run-latest.json). Scanning starts
- * here — nothing earlier can contain TwinCheck events.
+ * Block of the judged TwinCheck deployment, recorded in DEPLOYMENTS.md.
+ * Scanning starts here — nothing earlier can contain TwinCheck events.
  */
 export const DEPLOY_BLOCK = BigInt(
   import.meta.env.VITE_TWINCHECK_DEPLOY_BLOCK || "46027838",
