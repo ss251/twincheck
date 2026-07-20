@@ -190,10 +190,12 @@ export async function scanLogsForward(opts: {
   to: bigint;
   pageBudget?: number;
   concurrency?: number;
-}): Promise<{ logs: Log[]; scannedTo: bigint }> {
+}): Promise<{ logs: Log[]; scannedTo: bigint; failed: boolean }> {
   const pageBudget = opts.pageBudget ?? 200;
   const concurrency = opts.concurrency ?? 5;
-  if (opts.from > opts.to) return { logs: [], scannedTo: opts.to };
+  if (opts.from > opts.to) {
+    return { logs: [], scannedTo: opts.to, failed: false };
+  }
 
   const ranges: { from: bigint; to: bigint }[] = [];
   let from = opts.from;
@@ -218,7 +220,9 @@ export async function scanLogsForward(opts: {
     // confirmed page and the next poll resumes exactly there.
     for (let j = 0; j < results.length; j++) {
       const res = results[j];
-      if (res.status !== "fulfilled") return { logs: out, scannedTo };
+      if (res.status !== "fulfilled") {
+        return { logs: out, scannedTo, failed: true };
+      }
       out.push(...res.value);
       scannedTo = batch[j].to;
     }
@@ -228,7 +232,7 @@ export async function scanLogsForward(opts: {
       await new Promise((r) => setTimeout(r, 350));
     }
   }
-  return { logs: out, scannedTo };
+  return { logs: out, scannedTo, failed: false };
 }
 
 export function reconcileFeedEvents(
@@ -245,6 +249,39 @@ export function reconcileFeedEvents(
   }
   for (const event of replacements) events.set(event.key, event);
   return [...events.values()];
+}
+
+export function reconcileFeedHead(
+  existing: Iterable<PulseEvent>,
+  frontier: bigint,
+  latest: bigint,
+  deployBlock = DEPLOY_BLOCK,
+  overlap = REORG_OVERLAP_BLOCKS,
+): {
+  frontier: bigint;
+  events: PulseEvent[];
+  rescanFrom: bigint | null;
+} {
+  const events = [...existing];
+  if (frontier <= latest) {
+    return { frontier, events, rescanFrom: null };
+  }
+  if (latest < deployBlock) {
+    return {
+      frontier: deployBlock - 1n,
+      events: [],
+      rescanFrom: null,
+    };
+  }
+  const rescanFrom =
+    latest - deployBlock + 1n > overlap
+      ? latest - overlap + 1n
+      : deployBlock;
+  return {
+    frontier: latest,
+    events: reconcileFeedEvents(events, [], rescanFrom, frontier),
+    rescanFrom,
+  };
 }
 
 // ── Feed cache (localStorage) ────────────────────────────────────────────────

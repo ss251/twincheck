@@ -10,6 +10,7 @@ import {
   pulseEvent,
   scanLogsForward,
   reconcileFeedEvents,
+  reconcileFeedHead,
   comparePulseEventsNewestFirst,
   classifyPendingReports,
   loadFeedCache,
@@ -334,6 +335,8 @@ export default function App() {
   const frontierRef = useRef<bigint | null>(null);
   const feedMapRef = useRef<Map<string, PulseEvent>>(new Map());
   const [backfilling, setBackfilling] = useState(false);
+  const [feedReady, setFeedReady] = useState(false);
+  const [feedError, setFeedError] = useState<string | null>(null);
 
   const configured = TWIN !== "0x0000000000000000000000000000000000000000";
 
@@ -350,22 +353,35 @@ export default function App() {
           for (const e of cached.events) feedMapRef.current.set(e.key, e);
         }
       }
+      const normalized = reconcileFeedHead(
+        feedMapRef.current.values(),
+        frontierRef.current,
+        latest,
+      );
+      if (normalized.rescanFrom !== null || normalized.frontier !== frontierRef.current) {
+        frontierRef.current = normalized.frontier;
+        feedMapRef.current = new Map(
+          normalized.events.map((event) => [event.key, event]),
+        );
+        saveFeedCache(frontierRef.current, normalized.events);
+      }
       const previousFrontier = frontierRef.current;
       const nearHeadThreshold =
         latest > REORG_OVERLAP_BLOCKS ? latest - REORG_OVERLAP_BLOCKS : 0n;
       const from =
-        previousFrontier >= nearHeadThreshold
+        normalized.rescanFrom ??
+        (previousFrontier >= nearHeadThreshold
           ? previousFrontier >= DEPLOY_BLOCK + REORG_OVERLAP_BLOCKS
             ? previousFrontier - REORG_OVERLAP_BLOCKS + 1n
             : DEPLOY_BLOCK
-          : previousFrontier + 1n;
+          : previousFrontier + 1n);
       if (from <= latest) {
         // Far behind (cold cache) → backfill hard so historical events surface
         // within ~a minute; caught up → gentle steady-state paging.
         const behind =
           latest - (previousFrontier > latest ? latest : previousFrontier);
         const pageBudget = behind > 40_000n ? 500 : 120;
-        const { logs, scannedTo } = await scanLogsForward({
+        const { logs, scannedTo, failed } = await scanLogsForward({
           address: TWIN,
           from,
           to: latest,
@@ -392,12 +408,9 @@ export default function App() {
           );
         }
         frontierRef.current =
-          previousFrontier > latest && scannedTo === latest
-            ? latest
-            : scannedTo > previousFrontier
-              ? scannedTo
-              : previousFrontier;
+          scannedTo > previousFrontier ? scannedTo : previousFrontier;
         saveFeedCache(frontierRef.current, [...feedMapRef.current.values()]);
+        if (failed) throw new Error("Event history scan was interrupted.");
       }
       setBackfilling(frontierRef.current < latest);
       const events = [...feedMapRef.current.values()].sort(
@@ -466,7 +479,24 @@ export default function App() {
       setBlock(latest);
       const events = await advanceFeed(latest);
       setFeed(events.slice(0, 80));
-    } catch {
+      setFeedReady(true);
+      setFeedError(null);
+    } catch (e) {
+      if (feedMapRef.current.size === 0) {
+        const cached = loadFeedCache();
+        if (cached) {
+          frontierRef.current = cached.frontier;
+          feedMapRef.current = new Map(
+            cached.events.map((event) => [event.key, event]),
+          );
+        }
+      }
+      setFeed(
+        [...feedMapRef.current.values()]
+          .sort(comparePulseEventsNewestFirst)
+          .slice(0, 80),
+      );
+      setFeedError(e instanceof Error ? e.message : String(e));
     } finally {
       feedInFlight.current = false;
     }
@@ -536,17 +566,23 @@ export default function App() {
         attestorsRef.current = { a, b };
         setAttestors({ a, b });
 
-        // Diff-based target list: only indexes we have not read yet.
         const n = Number(count);
-        const known = targetsRef.current.length;
-        for (let i = known; i < n; i++) {
+        const canonicalTargets: Address[] = [];
+        for (let i = 0; i < n; i++) {
           const t = await client.readContract({
             address: TWIN,
             abi: twinAbi,
             functionName: "watchedAt",
             args: [BigInt(i)],
           });
-          targetsRef.current.push(t);
+          canonicalTargets.push(t);
+        }
+        targetsRef.current = canonicalTargets;
+        const canonicalKeys = new Set(
+          canonicalTargets.map((target) => target.toLowerCase()),
+        );
+        for (const key of cardRowsRef.current.keys()) {
+          if (!canonicalKeys.has(key)) cardRowsRef.current.delete(key);
         }
 
         // Cards come from contract STATE (watchedCount/watchedAt) — they must
@@ -562,7 +598,7 @@ export default function App() {
             failedRows++;
           }
         }
-        if (rows.length > 0 || initial) applyRows(rows);
+        applyRows(rows);
         setError(
           failedRows > 0
             ? `${failedRows} card${failedRows === 1 ? "" : "s"} could not be refreshed.`
@@ -814,7 +850,9 @@ export default function App() {
         <div className="section-head">
           <h2>Onchain pulse</h2>
           <span className="ledger-note">
-            {backfilling
+            {feedError
+              ? "feed refresh failed — cached history remains visible while retrying"
+              : backfilling
               ? "catching up on history — the full feed since deploy fills in as older blocks are scanned"
               : "every watch, report, settle, and flip since the contract was deployed"}
           </span>
@@ -822,7 +860,9 @@ export default function App() {
         <ol className="feed">
           {feed.length === 0 && (
             <li className="feed-empty">
-              {backfilling
+              {feedError
+                ? "Pulse history is unavailable right now. TwinCheck will retry automatically."
+                : !feedReady || backfilling
                 ? "Reading event history from the chain…"
                 : "Quiet — no TwinCheck events yet. New pulses land here when the attestors re-check."}
             </li>

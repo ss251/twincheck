@@ -4,6 +4,7 @@ import {
   classifyPendingReports,
   comparePulseEventsNewestFirst,
   reconcileFeedEvents,
+  reconcileFeedHead,
   type PulseEvent,
 } from "../src/chain";
 
@@ -41,6 +42,52 @@ describe("reconcileFeedEvents", () => {
     const result = reconcileFeedEvents([covered, unscanned], [], 96n, 120n);
 
     expect(result.map((item) => item.key)).toEqual(["2"]);
+  });
+});
+
+describe("reconcileFeedHead", () => {
+  test("rewinds a frontier beyond the head and invalidates the overlap", () => {
+    const retained = event("1", 800n);
+    const overlapping = event("2", 850n);
+    const future = event("3", 950n);
+    const result = reconcileFeedHead(
+      [retained, overlapping, future],
+      1_000n,
+      900n,
+      700n,
+      64n,
+    );
+
+    expect(result.frontier).toBe(900n);
+    expect(result.rescanFrom).toBe(837n);
+    expect(result.events.map((item) => item.key)).toEqual(["1"]);
+  });
+
+  test("clears cached history when the head precedes deployment", () => {
+    const result = reconcileFeedHead(
+      [event("1", 800n)],
+      1_000n,
+      600n,
+      700n,
+      64n,
+    );
+
+    expect(result).toEqual({
+      frontier: 699n,
+      events: [],
+      rescanFrom: null,
+    });
+  });
+
+  test("leaves a frontier at or below the head unchanged", () => {
+    const existing = [event("1", 800n)];
+    const result = reconcileFeedHead(existing, 850n, 900n, 700n, 64n);
+
+    expect(result).toEqual({
+      frontier: 850n,
+      events: existing,
+      rescanFrom: null,
+    });
   });
 });
 
