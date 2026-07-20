@@ -366,6 +366,7 @@ export default function App() {
         saveFeedCache(frontierRef.current, normalized.events);
       }
       const previousFrontier = frontierRef.current;
+      let incomplete = false;
       const nearHeadThreshold =
         latest > REORG_OVERLAP_BLOCKS ? latest - REORG_OVERLAP_BLOCKS : 0n;
       const from =
@@ -376,11 +377,11 @@ export default function App() {
             : DEPLOY_BLOCK
           : previousFrontier + 1n);
       if (from <= latest) {
-        // Far behind (cold cache) → backfill hard so historical events surface
-        // within ~a minute; caught up → gentle steady-state paging.
-        const behind =
-          latest - (previousFrontier > latest ? latest : previousFrontier);
-        const pageBudget = behind > 40_000n ? 500 : 120;
+        // First pass stays SMALL so the event cluster (right after deploy)
+        // surfaces within seconds instead of being withheld behind a long scan
+        // of empty blocks. Once events are loaded, widen the budget to grind the
+        // empty tail up to head quickly so the "catching up" state clears.
+        const pageBudget = feedMapRef.current.size === 0 ? 100 : 600;
         const { logs, scannedTo, failed } = await scanLogsForward({
           address: TWIN,
           from,
@@ -410,9 +411,15 @@ export default function App() {
         frontierRef.current =
           scannedTo > previousFrontier ? scannedTo : previousFrontier;
         saveFeedCache(frontierRef.current, [...feedMapRef.current.values()]);
-        if (failed) throw new Error("Event history scan was interrupted.");
+        // A transient page failure is NOT an error: the scan still made
+        // progress, already-found events are kept, and the next poll resumes at
+        // the frontier. Staying in the backfilling state shows "reading
+        // history…" (never a false "quiet/empty") without discarding the events
+        // this pass DID find. Genuine failures (e.g. getBlockNumber) surface as
+        // exceptions in the caller.
+        if (failed) incomplete = true;
       }
-      setBackfilling(frontierRef.current < latest);
+      setBackfilling(incomplete || frontierRef.current < latest);
       const events = [...feedMapRef.current.values()].sort(
         comparePulseEventsNewestFirst,
       );
