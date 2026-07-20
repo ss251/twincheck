@@ -10,6 +10,7 @@
  *   twincheck run     — sample registry, watch, dual-report (demo path)
  */
 import type { Address, Hex } from "viem";
+import type { TwinConfig } from "./config";
 import {
   getConfig,
   getProbeConfig,
@@ -21,7 +22,6 @@ import {
   getCode,
   hasMatchingSettlement,
   hashEvidence,
-  hashDualEvidence,
   readCard,
   reportOne,
   validateAttestorConfig,
@@ -153,6 +153,53 @@ export type DualReportOutcome = {
   cardDualOK: boolean;
 };
 
+type CardState = readonly [
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  bigint,
+  Hex,
+];
+
+export type DualReportDependencies = {
+  readCard: (cfg: TwinConfig, target: Address) => Promise<CardState>;
+  watchBatch: (
+    cfg: TwinConfig,
+    key: Hex,
+    targets: Address[],
+  ) => Promise<Hex>;
+  probeDual: (
+    target: Address,
+    cfg: TwinConfig,
+  ) => Promise<DualResult>;
+  reportOne: (
+    cfg: TwinConfig,
+    key: Hex,
+    target: Address,
+    scanOK: boolean,
+    visionOK: boolean,
+    evidenceHash: Hex,
+  ) => Promise<{
+    hash: Hex;
+    receipt: {
+      logs: readonly {
+        address: Address;
+        data: Hex;
+        topics: readonly Hex[];
+      }[];
+    };
+  }>;
+};
+
+const defaultDualReportDependencies: DualReportDependencies = {
+  readCard,
+  watchBatch,
+  probeDual,
+  reportOne,
+};
+
 /**
  * Dual-principal attestation with INDEPENDENT measurements: each principal
  * runs its own explorer probe and signs its own observation. The contract
@@ -160,14 +207,15 @@ export type DualReportOutcome = {
  * both observations — see TwinCheck.report). One shared measurement signed
  * twice would make the second signature meaningless.
  */
-async function dualReport(
-  cfg: ReturnType<typeof getConfig>,
+export async function dualReport(
+  cfg: TwinConfig,
   target: Address,
+  deps: DualReportDependencies = defaultDualReportDependencies,
 ): Promise<DualReportOutcome> {
   // Ensure watched
-  const card = await readCard(cfg, target);
+  const card = await deps.readCard(cfg, target);
   if (!card[0]) {
-    const wh = await watchBatch(cfg, cfg.keyA, [target]);
+    const wh = await deps.watchBatch(cfg, cfg.keyA, [target]);
     console.log(`watch tx ${txUrl(cfg, wh)}`);
   }
 
@@ -178,10 +226,9 @@ async function dualReport(
 
   const results: DualResult[] = [];
   const reported: boolean[] = [];
-  const evidenceHashes: Hex[] = [];
   let settledThisRun = false;
   for (const p of principals) {
-    const r = await probeDual(target, cfg);
+    const r = await deps.probeDual(target, cfg);
     printDual(r, `principal ${p.label}`);
     results.push(r);
     if (hasProbeError(r)) {
@@ -194,31 +241,31 @@ async function dualReport(
     }
     const payload = evidenceHashPayload(r);
     const eh = hashEvidence(payload);
-    evidenceHashes.push(eh);
     console.log(`principal ${p.label} evidenceHash ${eh}`);
     console.log(`principal ${p.label} payload ${payload}`);
-    const report = await reportOne(cfg, p.key, target, r.scanOK, r.visionOK, eh);
+    const report = await deps.reportOne(
+      cfg,
+      p.key,
+      target,
+      r.scanOK,
+      r.visionOK,
+      eh,
+    );
     console.log(`report ${p.label} ${txUrl(cfg, report.hash)}`);
     reported.push(true);
-    if (
-      p.label === "B" &&
-      reported[0] &&
-      results[0].scanOK === r.scanOK &&
-      results[0].visionOK === r.visionOK
-    ) {
-      settledThisRun = hasMatchingSettlement(
+    settledThisRun =
+      settledThisRun ||
+      hasMatchingSettlement(
         report.receipt.logs,
         cfg.twin,
         target,
         r.scanOK,
         r.visionOK,
-        hashDualEvidence(evidenceHashes[0], eh),
       );
-    }
   }
 
   if (!reported[0] && !reported[1]) {
-    throw new Error(
+    console.error(
       `no attestation for ${target}: both principals had indeterminate probes. ` +
         `Transient explorer failures must not be recorded on-chain as "unverified".`,
     );
@@ -231,7 +278,7 @@ async function dualReport(
     );
   }
 
-  const after = await readCard(cfg, target);
+  const after = await deps.readCard(cfg, target);
   console.log(
     JSON.stringify(
       {
@@ -272,7 +319,13 @@ async function cmdCheck(flags: Record<string, string | boolean>) {
 
 export function dualReportExitCode(out: DualReportOutcome): 0 | 1 | 2 {
   if (!out.reportedA || !out.reportedB) return 2;
-  return out.settledThisRun && out.rA.scanOK && out.rA.visionOK ? 0 : 1;
+  return out.settledThisRun &&
+    out.rA.scanOK &&
+    out.rA.visionOK &&
+    out.rB.scanOK &&
+    out.rB.visionOK
+    ? 0
+    : 1;
 }
 
 async function cmdCard(flags: Record<string, string | boolean>) {

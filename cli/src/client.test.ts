@@ -55,7 +55,7 @@ function settlementLog(overrides: {
 }
 
 describe("hasMatchingSettlement", () => {
-  test("accepts only the exact contract, target, bits, and combined evidence", () => {
+  test("treats the event evidence commitment as version-opaque", () => {
     expect(
       hasMatchingSettlement(
         [settlementLog()],
@@ -63,28 +63,34 @@ describe("hasMatchingSettlement", () => {
         target,
         true,
         true,
-        combined,
       ),
     ).toBe(true);
+    expect(
+      hasMatchingSettlement(
+        [settlementLog({ evidenceHash: evidenceA })],
+        contract,
+        target,
+        true,
+        true,
+      ),
+    ).toBe(true);
+  });
 
+  test("accepts only the exact contract, target, and status bits", () => {
     const other = "0x3333333333333333333333333333333333333333" as Address;
-    const wrongEvidence = `0x${"cc".repeat(32)}` as Hex;
     for (const log of [
       settlementLog({ address: other }),
       settlementLog({ target: other }),
       settlementLog({ scanOK: false }),
-      settlementLog({ evidenceHash: wrongEvidence }),
     ]) {
       expect(
-        hasMatchingSettlement([log], contract, target, true, true, combined),
+        hasMatchingSettlement([log], contract, target, true, true),
       ).toBe(false);
     }
   });
 
   test("rejects a receipt without a settlement event", () => {
-    expect(hasMatchingSettlement([], contract, target, true, true, combined)).toBe(
-      false,
-    );
+    expect(hasMatchingSettlement([], contract, target, true, true)).toBe(false);
   });
 });
 

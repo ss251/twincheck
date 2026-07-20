@@ -99,10 +99,12 @@ describe("classifyScanResponse", () => {
 
 describe("retry policy", () => {
   test("retryable statuses", () => {
-    for (const s of [408, 429, 500, 502, 503, 504]) {
+    for (const s of [
+      408, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 599,
+    ]) {
       expect(isRetryableStatus(s)).toBe(true);
     }
-    for (const s of [200, 301, 400, 403, 404]) {
+    for (const s of [200, 301, 400, 403, 404, 600]) {
       expect(isRetryableStatus(s)).toBe(false);
     }
   });

@@ -38,10 +38,8 @@ export type DualResult = {
 export const PROBE_TIMEOUT_MS = 8000;
 export const PROBE_MAX_ATTEMPTS = 3;
 
-const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
-
 export function isRetryableStatus(status: number): boolean {
-  return RETRYABLE_STATUS.has(status);
+  return status === 408 || status === 429 || (status >= 500 && status < 600);
 }
 
 /** Exponential backoff with jitter: 400ms, 800ms (+0–250ms jitter). */

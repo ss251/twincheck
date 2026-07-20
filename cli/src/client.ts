@@ -174,7 +174,6 @@ export function hasMatchingSettlement(
   target: Address,
   scanOK: boolean,
   visionOK: boolean,
-  evidenceHash: Hex,
 ): boolean {
   for (const log of logs) {
     if (log.address.toLowerCase() !== contract.toLowerCase()) continue;
@@ -190,8 +189,7 @@ export function hasMatchingSettlement(
         args.target.toLowerCase() === target.toLowerCase() &&
         args.scanOK === scanOK &&
         args.visionOK === visionOK &&
-        args.dualOK === (scanOK && visionOK) &&
-        args.evidenceHash.toLowerCase() === evidenceHash.toLowerCase()
+        args.dualOK === (scanOK && visionOK)
       ) {
         return true;
       }
