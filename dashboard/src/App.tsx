@@ -342,11 +342,15 @@ export default function App() {
       const fresh: PulseEvent[] = [];
       const from = frontierRef.current + 1n;
       if (from <= latest) {
+        // Far behind (cold cache) → backfill hard so historical events surface
+        // within ~a minute; caught up → gentle steady-state paging.
+        const behind = latest - frontierRef.current;
+        const pageBudget = behind > 40_000n ? 500 : 120;
         const { logs, scannedTo } = await scanLogsForward({
           address: TWIN,
           from,
           to: latest,
-          pageBudget: 150,
+          pageBudget,
         });
         for (const log of logs) {
           const e = decodeAny(log);
@@ -498,24 +502,37 @@ export default function App() {
           targetsRef.current.push(t);
         }
 
-        // Advance the event scan; fresh events say which cards changed.
-        const { events, fresh } = await advanceFeed(latest);
-        setFeed(events.slice(0, 80));
-
-        const toRead = new Map<string, Address>();
+        // Cards come from contract STATE (watchedCount/watchedAt) — they must
+        // paint immediately and never wait on the historical log scan below.
+        const cardTargets = new Map<string, Address>();
         if (initial) {
-          for (const t of targetsRef.current) toRead.set(t.toLowerCase(), t);
+          for (const t of targetsRef.current) cardTargets.set(t.toLowerCase(), t);
         } else {
           for (let i = known; i < n; i++) {
             const t = targetsRef.current[i];
-            toRead.set(t.toLowerCase(), t);
+            cardTargets.set(t.toLowerCase(), t);
           }
-          for (const e of fresh) toRead.set(e.target.toLowerCase(), e.target);
         }
         const rows: CardRow[] = [];
-        for (const t of toRead.values()) rows.push(await readCardRow(t));
+        for (const t of cardTargets.values()) rows.push(await readCardRow(t));
         if (rows.length > 0 || initial) applyRows(rows);
         setError(null);
+        if (initial) setLoading(false); // cards are live; the feed fills in behind
+
+        // The pulse feed is a background history scan. A slow cold backfill (or
+        // a transient RPC failure) must NEVER gate or blank the cards above, so
+        // it runs isolated; fresh events only re-read the cards they touch.
+        try {
+          const { events, fresh } = await advanceFeed(latest);
+          setFeed(events.slice(0, 80));
+          if (fresh.length > 0) {
+            const touched: CardRow[] = [];
+            for (const e of fresh) touched.push(await readCardRow(e.target));
+            applyRows(touched);
+          }
+        } catch {
+          /* feed is best-effort — the cards are already rendered */
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {

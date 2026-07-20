@@ -150,7 +150,7 @@ export const LOG_PAGE_SIZE = 100n;
  * here — nothing earlier can contain TwinCheck events.
  */
 export const DEPLOY_BLOCK = BigInt(
-  import.meta.env.VITE_TWINCHECK_DEPLOY_BLOCK || "46032958",
+  import.meta.env.VITE_TWINCHECK_DEPLOY_BLOCK || "46027838",
 );
 
 /**
@@ -181,13 +181,21 @@ export async function scanLogsForward(opts: {
   let scannedTo = opts.from - 1n;
   for (let i = 0; i < ranges.length; i += concurrency) {
     const batch = ranges.slice(i, i + concurrency);
-    const chunks = await Promise.all(
+    const results = await Promise.allSettled(
       batch.map((r) =>
         client.getLogs({ address: opts.address, fromBlock: r.from, toBlock: r.to }),
       ),
     );
-    for (const chunk of chunks) out.push(...chunk);
-    scannedTo = batch[batch.length - 1].to;
+    // Advance the frontier only across the LEADING run of successful pages. A
+    // single failed getLogs (transient RPC 429/timeout) then neither discards
+    // logs already collected nor skips a block — the frontier stops at the last
+    // confirmed page and the next poll resumes exactly there.
+    for (let j = 0; j < results.length; j++) {
+      const res = results[j];
+      if (res.status !== "fulfilled") return { logs: out, scannedTo };
+      out.push(...res.value);
+      scannedTo = batch[j].to;
+    }
     // Monad public RPC allows 25 req/s per IP — pace the backfill so the
     // dashboard never trips the limit (and leaves headroom for card reads).
     if (i + concurrency < ranges.length) {
@@ -208,7 +216,10 @@ type FeedCacheShape = {
   events: StoredEvent[];
 };
 
-const FEED_CACHE_VERSION = 1;
+// Bump whenever the scan's start block or event shape changes — a stale cached
+// frontier from an earlier DEPLOY_BLOCK would otherwise skip the backfill and
+// leave the feed permanently empty.
+const FEED_CACHE_VERSION = 2;
 
 function feedCacheKey(): string {
   return `twincheck.feed.v${FEED_CACHE_VERSION}.${MONAD_CHAIN_ID}.${TWIN.toLowerCase()}`;
