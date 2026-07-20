@@ -98,6 +98,34 @@ contract TwinCheckTest is Test {
         tc.report(target, true, true, bytes32(0));
     }
 
+    function test_report_rejects_zero_evidence() public {
+        vm.prank(a);
+        tc.watch(target);
+
+        vm.prank(a);
+        vm.expectRevert(TwinCheck.ZeroEvidence.selector);
+        tc.report(target, true, true, bytes32(0));
+
+        (,,,, bool exists) = tc.reports(target, a);
+        assertFalse(exists);
+    }
+
+    function test_stale_partial_observation_requires_fresh_counterpart() public {
+        vm.prank(a);
+        tc.watch(target);
+        vm.prank(a);
+        tc.report(target, true, true, bytes32(uint256(1)));
+
+        vm.warp(block.timestamp + tc.MAX_REPORT_AGE() + 1);
+        vm.prank(b);
+        tc.report(target, true, true, bytes32(uint256(2)));
+        assertFalse(tc.isSettled(target));
+
+        vm.prank(a);
+        tc.report(target, true, true, bytes32(uint256(3)));
+        assertTrue(tc.dualOK(target));
+    }
+
     function test_watchBatch_skips_duplicates() public {
         address t2 = address(0x2222);
         address[] memory targets = new address[](3);

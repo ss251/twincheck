@@ -17,7 +17,7 @@ contract TwinCheck {
     error SameAttestors();
     error NotWatched(address target);
     error AlreadyWatched(address target);
-    
+    error ZeroEvidence();
 
     // ─────────────────────────────────────────────────────────────────────────
     // Types
@@ -80,6 +80,7 @@ contract TwinCheck {
 
     address public immutable attestorA;
     address public immutable attestorB;
+    uint64 public constant MAX_REPORT_AGE = 5 minutes;
 
     mapping(address target => Card) public cards;
     mapping(address target => mapping(address attestor => Observation)) public reports;
@@ -154,6 +155,7 @@ contract TwinCheck {
         onlyAttestor
     {
         if (!cards[target].watched) revert NotWatched(target);
+        if (evidenceHash == bytes32(0)) revert ZeroEvidence();
 
         reports[target][msg.sender] = Observation({
             scanOK: scanOK,
@@ -171,6 +173,8 @@ contract TwinCheck {
         // after a prior settle must not revert — the other principal still has
         // the old observation until they re-check.
         if (!oa.exists || !ob.exists) return;
+        uint64 oldestReport = oa.reportedAt < ob.reportedAt ? oa.reportedAt : ob.reportedAt;
+        if (uint64(block.timestamp) - oldestReport > MAX_REPORT_AGE) return;
         if (oa.scanOK != ob.scanOK || oa.visionOK != ob.visionOK) return;
 
         // Bind BOTH principals' evidence into the settled commitment so the dual

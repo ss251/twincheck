@@ -143,6 +143,7 @@ export function scanAddr(addr: string): string {
 
 /** Monad public RPC caps eth_getLogs to a 100-block range. */
 export const LOG_PAGE_SIZE = 100n;
+export const REORG_OVERLAP_BLOCKS = 64n;
 
 /**
  * Block the TwinCheck contract was deployed at (from the forge broadcast,
@@ -205,6 +206,22 @@ export async function scanLogsForward(opts: {
   return { logs: out, scannedTo };
 }
 
+export function reconcileFeedEvents(
+  existing: Iterable<PulseEvent>,
+  replacements: Iterable<PulseEvent>,
+  from: bigint,
+  to: bigint,
+): PulseEvent[] {
+  const events = new Map<string, PulseEvent>();
+  for (const event of existing) {
+    if (event.blockNumber < from || event.blockNumber > to) {
+      events.set(event.key, event);
+    }
+  }
+  for (const event of replacements) events.set(event.key, event);
+  return [...events.values()];
+}
+
 // ── Feed cache (localStorage) ────────────────────────────────────────────────
 // The full history from DEPLOY_BLOCK is scanned once per browser; afterwards
 // each poll only fetches blocks past the persisted frontier.
@@ -219,7 +236,7 @@ type FeedCacheShape = {
 // Bump whenever the scan's start block or event shape changes — a stale cached
 // frontier from an earlier DEPLOY_BLOCK would otherwise skip the backfill and
 // leave the feed permanently empty.
-const FEED_CACHE_VERSION = 2;
+const FEED_CACHE_VERSION = 3;
 
 function feedCacheKey(): string {
   return `twincheck.feed.v${FEED_CACHE_VERSION}.${MONAD_CHAIN_ID}.${TWIN.toLowerCase()}`;

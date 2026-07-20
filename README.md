@@ -29,13 +29,13 @@ Exit codes are CI-friendly: `0` dual-verified, `1` genuinely unverified somewher
 
 ## Two layers, adopt either
 
-**1. The reusable checker (`cli/`)** — zero-dependency-on-us dual probe of Monadscan (HTML status) + MonadVision (BlockVision Sourcify API), with per-attempt timeouts, retry with backoff, and an explicit *error* signal class so transient failures are never reported as "unverified". This alone answers #369 for the registry CSV: `twincheck run` sweeps a sample end-to-end.
+**1. The reusable checker (`cli/`)** — zero-dependency-on-us dual probe of Monadscan (HTML status) + MonadVision (BlockVision Sourcify API), with per-attempt timeouts, retry with backoff, and an explicit *error* signal class so transient failures are never reported as "unverified". Invoke `twincheck probe` for each registry address in CI.
 
 **2. The on-chain trust layer (`src/TwinCheck.sol` + `dashboard/`)** — optional, for when a status claim should be *attributable*: two independent principals each run their own probe and sign their own observation; the contract settles a card only when both independently agree, and emits `DualStatusPulse` when a settled status flips. The dashboard renders the cards and the pulse feed.
 
 ## Adopt this (the ask)
 
-For `monad-crypto/protocols` maintainers: a scheduled CI job that runs `twincheck probe` (or `run`) over the registry CSV and fails / opens an issue when a registry address loses dual verification. The checker is MIT, needs no keys for probing, and its exit codes are built for exactly this. We're happy to contribute the GitHub Action.
+For `monad-crypto/protocols` maintainers: a scheduled CI job that runs `twincheck probe` over each address in the registry CSV and fails / opens an issue when a registry address loses dual verification. The checker is MIT, needs no keys for probing, and its exit codes are built for exactly this. We're happy to contribute the GitHub Action.
 
 ## Live (Monad Testnet)
 

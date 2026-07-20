@@ -58,7 +58,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export async function fetchWithRetry(
   url: string,
   init: RequestInit,
-): Promise<{ res: Response | null; failSignal: string }> {
+): Promise<{ res: Response | null; body: string | null; failSignal: string }> {
   let failSignal = "network_error";
   for (let attempt = 1; attempt <= PROBE_MAX_ATTEMPTS; attempt++) {
     if (attempt > 1) await sleep(backoffMs(attempt - 1));
@@ -71,7 +71,8 @@ export async function fetchWithRetry(
         failSignal = `http_${res.status}`;
         continue;
       }
-      return { res, failSignal: "" };
+      const body = await res.text();
+      return { res, body, failSignal: "" };
     } catch (e) {
       failSignal =
         e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")
@@ -79,7 +80,7 @@ export async function fetchWithRetry(
           : "network_error";
     }
   }
-  return { res: null, failSignal };
+  return { res: null, body: null, failSignal };
 }
 
 /**
@@ -94,17 +95,32 @@ export function classifyVisionResponse(
   if (status < 200 || status >= 300) {
     return { ok: false, error: true, signal: `http_${status}` };
   }
-  const b = body as { match?: string | null; runtimeMatch?: string | null } | null;
-  if (!b || typeof b !== "object") {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
     return { ok: false, error: true, signal: "bad_json" };
   }
-  const match = b.match || b.runtimeMatch || null;
-  const ok =
-    match === "exact_match" ||
-    match === "match" ||
-    match === "partial_match" ||
-    Boolean(match && match !== "null");
-  return { ok, error: false, signal: match ? String(match) : "unverified" };
+  const b = body as Record<string, unknown>;
+  const fields = ["match", "runtimeMatch"].filter((key) =>
+    Object.prototype.hasOwnProperty.call(b, key),
+  );
+  if (fields.length === 0) {
+    return { ok: false, error: true, signal: "bad_schema" };
+  }
+  const recognized = new Set(["exact_match", "match", "partial_match"]);
+  let verifiedSignal: string | null = null;
+  for (const field of fields) {
+    const value = b[field];
+    if (value === null) continue;
+    if (typeof value !== "string") {
+      return { ok: false, error: true, signal: "bad_schema" };
+    }
+    if (!recognized.has(value)) {
+      return { ok: false, error: true, signal: "unknown_match" };
+    }
+    verifiedSignal ??= value;
+  }
+  return verifiedSignal
+    ? { ok: true, error: false, signal: verifiedSignal }
+    : { ok: false, error: false, signal: "unverified" };
 }
 
 /**
@@ -138,19 +154,19 @@ export async function probeVision(
   base: string,
 ): Promise<ProbeOutcome> {
   const url = `${base.replace(/\/$/, "")}/${chainId}/${address}`;
-  const { res, failSignal } = await fetchWithRetry(url, {
+  const { res, body, failSignal } = await fetchWithRetry(url, {
     headers: { accept: "application/json", "user-agent": "twincheck/1.0" },
   });
   if (!res) return { ok: false, error: true, signal: failSignal };
   if (res.status === 404) return { ok: false, error: false, signal: "unverified" };
   if (!res.ok) return { ok: false, error: true, signal: `http_${res.status}` };
-  let body: unknown;
+  let parsed: unknown;
   try {
-    body = await res.json();
+    parsed = JSON.parse(body ?? "");
   } catch {
     return { ok: false, error: true, signal: "bad_json" };
   }
-  return classifyVisionResponse(res.status, body);
+  return classifyVisionResponse(res.status, parsed);
 }
 
 export async function probeScan(
@@ -158,7 +174,7 @@ export async function probeScan(
   scanBase: string,
 ): Promise<ProbeOutcome> {
   const url = `${scanBase.replace(/\/$/, "")}/address/${address}`;
-  const { res, failSignal } = await fetchWithRetry(url, {
+  const { res, body, failSignal } = await fetchWithRetry(url, {
     headers: {
       accept: "text/html",
       "user-agent":
@@ -166,8 +182,7 @@ export async function probeScan(
     },
   });
   if (!res) return { ok: false, error: true, signal: failSignal };
-  const html = res.ok ? await res.text() : "";
-  return classifyScanResponse(res.status, html);
+  return classifyScanResponse(res.status, res.ok ? body ?? "" : "");
 }
 
 export async function probeDual(

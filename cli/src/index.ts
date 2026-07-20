@@ -10,14 +10,19 @@
  *   twincheck run     — sample registry, watch, dual-report (demo path)
  */
 import type { Address } from "viem";
-import { getConfig, loadEnv, txUrl, addressUrl } from "./config";
+import {
+  getConfig,
+  getProbeConfig,
+  loadEnv,
+  txUrl,
+  addressUrl,
+} from "./config";
 import {
   getCode,
   hashEvidence,
   readCard,
   reportOne,
   watchBatch,
-  watchOne,
 } from "./client";
 import {
   evidenceHashPayload,
@@ -66,7 +71,7 @@ function asAddr(s: string): Address {
 }
 
 async function cmdProbe(flags: Record<string, string | boolean>) {
-  const cfg = getConfig();
+  const cfg = getProbeConfig();
   const address = asAddr(String(flags.address));
   const r = await probeDual(address, cfg);
   printDual(r);
@@ -118,7 +123,7 @@ async function cmdWatch(flags: Record<string, string | boolean>) {
       console.log(`already watched ${target} — nothing to do`);
       return;
     }
-    const hash = await watchOne(cfg, cfg.keyA, target);
+    const hash = await watchBatch(cfg, cfg.keyA, [target]);
     console.log(`watched ${target}`);
     console.log(`tx ${txUrl(cfg, hash)}`);
     return;
@@ -134,7 +139,7 @@ async function cmdWatch(flags: Record<string, string | boolean>) {
   console.log(`tx ${txUrl(cfg, hash)}`);
 }
 
-type DualReportOutcome = {
+export type DualReportOutcome = {
   rA: DualResult;
   rB: DualResult;
   reportedA: boolean;
@@ -157,7 +162,7 @@ async function dualReport(
   // Ensure watched
   const card = await readCard(cfg, target);
   if (!card[0]) {
-    const wh = await watchOne(cfg, cfg.keyA, target);
+    const wh = await watchBatch(cfg, cfg.keyA, [target]);
     console.log(`watch tx ${txUrl(cfg, wh)}`);
   }
 
@@ -237,8 +242,14 @@ async function cmdCheck(flags: Record<string, string | boolean>) {
   const out = await dualReport(cfg, target);
   // exit 0 = settled dual-verified, 1 = determinate but not dual-verified,
   // 2 = at least one principal could not get a trustworthy answer
-  if (!out.reportedA || !out.reportedB) process.exit(2);
-  process.exit(out.dualOK ? 0 : 1);
+  process.exit(dualReportExitCode(out));
+}
+
+export function dualReportExitCode(out: DualReportOutcome): 0 | 1 | 2 {
+  if (!out.reportedA || !out.reportedB) return 2;
+  const agrees =
+    out.rA.scanOK === out.rB.scanOK && out.rA.visionOK === out.rB.visionOK;
+  return agrees && out.rA.scanOK && out.rA.visionOK ? 0 : 1;
 }
 
 async function cmdCard(flags: Record<string, string | boolean>) {
@@ -334,4 +345,4 @@ async function main() {
   }
 }
 
-main();
+if (import.meta.main) main();

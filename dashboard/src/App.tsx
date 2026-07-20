@@ -9,9 +9,11 @@ import {
   settledEvent,
   pulseEvent,
   scanLogsForward,
+  reconcileFeedEvents,
   loadFeedCache,
   saveFeedCache,
   DEPLOY_BLOCK,
+  REORG_OVERLAP_BLOCKS,
   type PulseEvent,
   shortAddr,
   explorerTx,
@@ -326,12 +328,11 @@ export default function App() {
   const configured = TWIN !== "0x0000000000000000000000000000000000000000";
 
   /**
-   * Scan the next slice of history, merge events, persist. Returns all known
-   * events (newest first) plus the events first seen in THIS pass, so the
-   * caller can re-read only the cards those events touched.
+   * Scan the next slice of history, merge events, persist, and return all known
+   * events newest first.
    */
   const advanceFeed = useCallback(
-    async (latest: bigint): Promise<{ events: PulseEvent[]; fresh: PulseEvent[] }> => {
+    async (latest: bigint): Promise<PulseEvent[]> => {
       if (frontierRef.current === null) {
         const cached = loadFeedCache();
         frontierRef.current = cached ? cached.frontier : DEPLOY_BLOCK - 1n;
@@ -339,12 +340,20 @@ export default function App() {
           for (const e of cached.events) feedMapRef.current.set(e.key, e);
         }
       }
-      const fresh: PulseEvent[] = [];
-      const from = frontierRef.current + 1n;
+      const previousFrontier = frontierRef.current;
+      const nearHeadThreshold =
+        latest > REORG_OVERLAP_BLOCKS ? latest - REORG_OVERLAP_BLOCKS : 0n;
+      const from =
+        previousFrontier >= nearHeadThreshold
+          ? previousFrontier >= DEPLOY_BLOCK + REORG_OVERLAP_BLOCKS
+            ? previousFrontier - REORG_OVERLAP_BLOCKS + 1n
+            : DEPLOY_BLOCK
+          : previousFrontier + 1n;
       if (from <= latest) {
         // Far behind (cold cache) → backfill hard so historical events surface
         // within ~a minute; caught up → gentle steady-state paging.
-        const behind = latest - frontierRef.current;
+        const behind =
+          latest - (previousFrontier > latest ? latest : previousFrontier);
         const pageBudget = behind > 40_000n ? 500 : 120;
         const { logs, scannedTo } = await scanLogsForward({
           address: TWIN,
@@ -352,21 +361,39 @@ export default function App() {
           to: latest,
           pageBudget,
         });
-        for (const log of logs) {
-          const e = decodeAny(log);
-          if (e && !feedMapRef.current.has(e.key)) {
-            feedMapRef.current.set(e.key, e);
-            fresh.push(e);
+        if (scannedTo >= from) {
+          const replacements: PulseEvent[] = [];
+          for (const log of logs) {
+            const event = decodeAny(log);
+            if (event) replacements.push(event);
           }
+          const replaceTo =
+            scannedTo === latest && previousFrontier > latest
+              ? previousFrontier
+              : scannedTo;
+          const reconciled = reconcileFeedEvents(
+            feedMapRef.current.values(),
+            replacements,
+            from,
+            replaceTo,
+          );
+          feedMapRef.current = new Map(
+            reconciled.map((event) => [event.key, event]),
+          );
         }
-        frontierRef.current = scannedTo;
-        saveFeedCache(scannedTo, [...feedMapRef.current.values()]);
+        frontierRef.current =
+          previousFrontier > latest && scannedTo === latest
+            ? latest
+            : scannedTo > previousFrontier
+              ? scannedTo
+              : previousFrontier;
+        saveFeedCache(frontierRef.current, [...feedMapRef.current.values()]);
       }
       setBackfilling(frontierRef.current < latest);
       const events = [...feedMapRef.current.values()].sort((x, y) =>
         Number(y.blockNumber - x.blockNumber),
       );
-      return { events, fresh };
+      return events;
     },
     [],
   );
@@ -447,8 +474,7 @@ export default function App() {
 
   /**
    * initial=true: full read behind a loading screen. initial=false: quiet
-   * background pass — only NEW targets and cards touched by NEW events get
-   * re-read; nothing sets `loading`, so the UI never flashes "Syncing…".
+   * background pass that refreshes contract state without flashing "Syncing…".
    */
   const sync = useCallback(
     async (initial: boolean) => {
@@ -505,14 +531,7 @@ export default function App() {
         // Cards come from contract STATE (watchedCount/watchedAt) — they must
         // paint immediately and never wait on the historical log scan below.
         const cardTargets = new Map<string, Address>();
-        if (initial) {
-          for (const t of targetsRef.current) cardTargets.set(t.toLowerCase(), t);
-        } else {
-          for (let i = known; i < n; i++) {
-            const t = targetsRef.current[i];
-            cardTargets.set(t.toLowerCase(), t);
-          }
-        }
+        for (const t of targetsRef.current) cardTargets.set(t.toLowerCase(), t);
         const rows: CardRow[] = [];
         for (const t of cardTargets.values()) rows.push(await readCardRow(t));
         if (rows.length > 0 || initial) applyRows(rows);
@@ -521,15 +540,10 @@ export default function App() {
 
         // The pulse feed is a background history scan. A slow cold backfill (or
         // a transient RPC failure) must NEVER gate or blank the cards above, so
-        // it runs isolated; fresh events only re-read the cards they touch.
+        // it runs isolated from contract-state refreshes.
         try {
-          const { events, fresh } = await advanceFeed(latest);
+          const events = await advanceFeed(latest);
           setFeed(events.slice(0, 80));
-          if (fresh.length > 0) {
-            const touched: CardRow[] = [];
-            for (const e of fresh) touched.push(await readCardRow(e.target));
-            applyRows(touched);
-          }
         } catch {
           /* feed is best-effort — the cards are already rendered */
         }

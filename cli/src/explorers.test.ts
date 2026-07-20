@@ -4,6 +4,7 @@ import {
   classifyScanResponse,
   classifyVisionResponse,
   evidenceHashPayload,
+  fetchWithRetry,
   hasProbeError,
   isRetryableStatus,
   type DualResult,
@@ -44,6 +45,21 @@ describe("classifyVisionResponse", () => {
   test("non-object body on 200 is an ERROR", () => {
     expect(classifyVisionResponse(200, null).error).toBe(true);
     expect(classifyVisionResponse(200, null).signal).toBe("bad_json");
+  });
+
+  test("schema-invalid and unknown match values are indeterminate", () => {
+    for (const body of [
+      {},
+      [],
+      { match: true },
+      { match: "full_match" },
+      { match: "null" },
+      { match: "exact_match", runtimeMatch: "unexpected" },
+    ]) {
+      const r = classifyVisionResponse(200, body);
+      expect(r.ok).toBe(false);
+      expect(r.error).toBe(true);
+    }
   });
 });
 
@@ -96,6 +112,30 @@ describe("retry policy", () => {
     expect(backoffMs(2, 0)).toBe(800);
     expect(backoffMs(1, 0.999)).toBeLessThan(400 + 250);
     expect(backoffMs(1, 0.5)).toBeGreaterThan(400);
+  });
+
+  test("response body failures stay inside the retry boundary", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return {
+        status: 200,
+        ok: true,
+        text: async () => {
+          if (calls === 1) throw new TypeError("stream reset");
+          return "complete";
+        },
+      } as Response;
+    }) as unknown as typeof fetch;
+    try {
+      const result = await fetchWithRetry("https://example.invalid", {});
+      expect(calls).toBe(2);
+      expect(result.body).toBe("complete");
+      expect(result.failSignal).toBe("");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

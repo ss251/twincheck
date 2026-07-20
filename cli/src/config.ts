@@ -2,7 +2,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { type Address, type Hex, isAddress, isHex } from "viem";
 
-export type TwinConfig = {
+export type ProbeConfig = {
+  probeChainId: number;
+  scanBase: string;
+  visionSourcifyBase: string;
+};
+
+export type TwinConfig = ProbeConfig & {
   rpcUrl: string;
   chainId: number;
   keyA: Hex;
@@ -10,10 +16,6 @@ export type TwinConfig = {
   twin: Address;
   explorerBase: string;
   registryCsvUrl: string;
-  /** Chain id used when probing explorers (mainnet registry → 143). */
-  probeChainId: number;
-  scanBase: string;
-  visionSourcifyBase: string;
 };
 
 function loadEnvFile(path: string): void {
@@ -61,6 +63,25 @@ function asHexKey(name: string, raw: string): Hex {
   return h as Hex;
 }
 
+function probeConfig(): ProbeConfig {
+  const probeChainId = Number(process.env.PROBE_CHAIN_ID || "143");
+  const isMainnetProbe = probeChainId === 143;
+  return {
+    probeChainId,
+    scanBase:
+      process.env.MONADSCAN_BASE ||
+      (isMainnetProbe ? "https://monadscan.com" : "https://testnet.monadscan.com"),
+    visionSourcifyBase:
+      process.env.VISION_SOURCIFY_BASE ||
+      "https://sourcify-api-monad.blockvision.org/v2/contract",
+  };
+}
+
+export function getProbeConfig(): ProbeConfig {
+  loadEnv();
+  return probeConfig();
+}
+
 export function getConfig(): TwinConfig {
   loadEnv();
   const keyA = asHexKey("PRIVATE_KEY", requireEnv("PRIVATE_KEY"));
@@ -72,9 +93,8 @@ export function getConfig(): TwinConfig {
   if (!isAddress(twin)) {
     throw new Error("Set TWINCHECK to the deployed TwinCheck address.");
   }
-  const probeChainId = Number(process.env.PROBE_CHAIN_ID || "143");
-  const isMainnetProbe = probeChainId === 143;
   return {
+    ...probeConfig(),
     rpcUrl: process.env.MONAD_RPC_URL || "https://testnet-rpc.monad.xyz",
     chainId: Number(process.env.MONAD_CHAIN_ID || "10143"),
     keyA,
@@ -84,13 +104,6 @@ export function getConfig(): TwinConfig {
     registryCsvUrl:
       process.env.REGISTRY_CSV_URL ||
       "https://raw.githubusercontent.com/monad-crypto/protocols/refs/heads/main/protocols-mainnet.csv",
-    probeChainId,
-    scanBase:
-      process.env.MONADSCAN_BASE ||
-      (isMainnetProbe ? "https://monadscan.com" : "https://testnet.monadscan.com"),
-    visionSourcifyBase:
-      process.env.VISION_SOURCIFY_BASE ||
-      "https://sourcify-api-monad.blockvision.org/v2/contract",
   };
 }
 
