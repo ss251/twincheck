@@ -41,6 +41,43 @@ export function walletClient(cfg: TwinConfig, key: Hex): WalletClient {
   });
 }
 
+export function assertConfiguredAttestors(
+  keyA: Hex,
+  keyB: Hex,
+  attestorA: Address,
+  attestorB: Address,
+): void {
+  const actualA = privateKeyToAccount(keyA).address;
+  const actualB = privateKeyToAccount(keyB).address;
+  if (actualA.toLowerCase() !== attestorA.toLowerCase()) {
+    throw new Error(
+      `PRIVATE_KEY must match TwinCheck attestorA ${attestorA}; got ${actualA}`,
+    );
+  }
+  if (actualB.toLowerCase() !== attestorB.toLowerCase()) {
+    throw new Error(
+      `PRINCIPAL_B_PRIVATE_KEY must match TwinCheck attestorB ${attestorB}; got ${actualB}`,
+    );
+  }
+}
+
+export async function validateAttestorConfig(cfg: TwinConfig): Promise<void> {
+  const pc = publicClient(cfg);
+  const [attestorA, attestorB] = await Promise.all([
+    pc.readContract({
+      address: cfg.twin,
+      abi: twinAbi,
+      functionName: "attestorA",
+    }),
+    pc.readContract({
+      address: cfg.twin,
+      abi: twinAbi,
+      functionName: "attestorB",
+    }),
+  ]);
+  assertConfiguredAttestors(cfg.keyA, cfg.keyB, attestorA, attestorB);
+}
+
 export async function getCode(cfg: TwinConfig, address: Address): Promise<Hex> {
   return publicClient(cfg).getCode({ address }) as Promise<Hex>;
 }

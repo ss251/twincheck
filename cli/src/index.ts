@@ -24,6 +24,7 @@ import {
   hashDualEvidence,
   readCard,
   reportOne,
+  validateAttestorConfig,
   watchBatch,
 } from "./client";
 import {
@@ -115,6 +116,7 @@ async function cmdWatch(flags: Record<string, string | boolean>) {
   const cfg = getConfig();
   const code = await getCode(cfg, cfg.twin);
   if (!code || code === "0x") throw new Error(`No code at ${cfg.twin}`);
+  await validateAttestorConfig(cfg);
 
   if (flags.address) {
     const target = asAddr(String(flags.address));
@@ -260,6 +262,7 @@ async function dualReport(
 async function cmdCheck(flags: Record<string, string | boolean>) {
   const cfg = getConfig();
   const target = asAddr(String(flags.address));
+  await validateAttestorConfig(cfg);
   // Each principal probes AND signs independently inside dualReport.
   const out = await dualReport(cfg, target);
   // exit 0 = settled dual-verified, 1 = determinate but not dual-verified,
@@ -296,6 +299,7 @@ async function cmdCard(flags: Record<string, string | boolean>) {
 
 async function cmdRun(flags: Record<string, string | boolean>) {
   const cfg = getConfig();
+  await validateAttestorConfig(cfg);
   const limit = Number(flags.limit || "5");
   const seed = flags.seed ? asAddr(String(flags.seed)) : null;
 

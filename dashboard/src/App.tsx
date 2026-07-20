@@ -411,6 +411,7 @@ export default function App() {
   const targetsRef = useRef<Address[]>([]);
   const cardRowsRef = useRef<Map<string, CardRow>>(new Map());
   const inFlight = useRef(false);
+  const feedInFlight = useRef(false);
 
   const attestorsRef = useRef<{ a: Address; b: Address } | null>(null);
 
@@ -457,6 +458,20 @@ export default function App() {
     };
   }, []);
 
+  const syncFeed = useCallback(async () => {
+    if (!configured || feedInFlight.current) return;
+    feedInFlight.current = true;
+    try {
+      const latest = await client.getBlockNumber();
+      setBlock(latest);
+      const events = await advanceFeed(latest);
+      setFeed(events.slice(0, 80));
+    } catch {
+    } finally {
+      feedInFlight.current = false;
+    }
+  }, [configured, advanceFeed]);
+
   /** Merge freshly-read rows, re-derive ordered card list, flag state flips. */
   const applyRows = useCallback((rows: CardRow[]) => {
     for (const r of rows) cardRowsRef.current.set(r.target.toLowerCase(), r);
@@ -501,7 +516,7 @@ export default function App() {
             throw new Error(`No contract code at ${TWIN}`);
           }
         }
-        const [a, b, count, latest] = await Promise.all([
+        const [a, b, count] = await Promise.all([
           client.readContract({
             address: TWIN,
             abi: twinAbi,
@@ -517,11 +532,9 @@ export default function App() {
             abi: twinAbi,
             functionName: "watchedCount",
           }),
-          client.getBlockNumber(),
         ]);
         attestorsRef.current = { a, b };
         setAttestors({ a, b });
-        setBlock(latest);
 
         // Diff-based target list: only indexes we have not read yet.
         const n = Number(count);
@@ -535,10 +548,6 @@ export default function App() {
           });
           targetsRef.current.push(t);
         }
-
-        const feedPromise = advanceFeed(latest)
-          .then((events) => setFeed(events.slice(0, 80)))
-          .catch(() => undefined);
 
         // Cards come from contract STATE (watchedCount/watchedAt) — they must
         // paint immediately and never wait on the historical log scan.
@@ -560,7 +569,6 @@ export default function App() {
             : null,
         );
         if (initial) setLoading(false); // cards are live; the feed fills in behind
-        await feedPromise;
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -568,14 +576,18 @@ export default function App() {
         inFlight.current = false;
       }
     },
-    [configured, advanceFeed, applyRows, readCardRow],
+    [configured, applyRows, readCardRow],
   );
 
   useEffect(() => {
     sync(true);
-    const id = setInterval(() => sync(false), 20_000);
+    syncFeed();
+    const id = setInterval(() => {
+      sync(false);
+      syncFeed();
+    }, 20_000);
     return () => clearInterval(id);
-  }, [sync]);
+  }, [sync, syncFeed]);
 
   const stats = useMemo(() => {
     const settled = cards.filter((c) => c.settled);
@@ -620,7 +632,10 @@ export default function App() {
             <button
               type="button"
               className="btn"
-              onClick={() => sync(false)}
+              onClick={() => {
+                sync(false);
+                syncFeed();
+              }}
               disabled={loading}
             >
               Refresh
