@@ -1,5 +1,6 @@
 import {
   createPublicClient,
+  decodeEventLog,
   http,
   parseAbiItem,
   type Address,
@@ -126,6 +127,72 @@ export type PulseEvent = {
   at?: number;
 };
 
+const feedEvents = [watchedEvent, reportedEvent, settledEvent, pulseEvent] as const;
+
+export function decodeFeedLog(log: Log): PulseEvent | null {
+  for (const abi of feedEvents) {
+    try {
+      const decoded = decodeEventLog({
+        abi: [abi],
+        data: log.data,
+        topics: log.topics as [Hex, ...Hex[]],
+      });
+      const args = decoded.args as any;
+      const tx = log.transactionHash as Hex;
+      const blockNumber = log.blockNumber ?? 0n;
+      const logIndex = Number(log.logIndex ?? 0);
+      const base = {
+        key: `${tx}:${logIndex}`,
+        target: args.target as Address,
+        tx,
+        blockNumber,
+        logIndex,
+      };
+      if (decoded.eventName === "DualStatusPulse") {
+        return {
+          ...base,
+          kind: "Pulse",
+          prevScanOK: args.prevScanOK,
+          prevVisionOK: args.prevVisionOK,
+          scanOK: args.scanOK,
+          visionOK: args.visionOK,
+          dualOK: args.dualOK,
+          at: Number(args.checkedAt),
+        };
+      }
+      if (decoded.eventName === "DualStatusSettled") {
+        return {
+          ...base,
+          kind: "Settled",
+          scanOK: args.scanOK,
+          visionOK: args.visionOK,
+          dualOK: args.dualOK,
+          at: Number(args.checkedAt),
+        };
+      }
+      if (decoded.eventName === "Reported") {
+        return {
+          ...base,
+          kind: "Reported",
+          attestor: args.attestor,
+          scanOK: args.scanOK,
+          visionOK: args.visionOK,
+          at: Number(args.at),
+        };
+      }
+      if (decoded.eventName === "Watched") {
+        return {
+          ...base,
+          kind: "Watched",
+          attestor: args.by,
+          at: Number(args.at),
+        };
+      }
+    } catch {}
+  }
+  return null;
+}
+
 export type PendingReportState = "A" | "B" | "both" | "disagree" | "stale";
 
 export function classifyPendingReports(
@@ -189,9 +256,15 @@ export async function scanLogsForward(opts: {
   to: bigint;
   pageBudget?: number;
   concurrency?: number;
+  getLogs?: (range: {
+    address: Address;
+    fromBlock: bigint;
+    toBlock: bigint;
+  }) => Promise<Log[]>;
 }): Promise<{ logs: Log[]; scannedTo: bigint; failed: boolean }> {
   const pageBudget = opts.pageBudget ?? 200;
   const concurrency = opts.concurrency ?? 5;
+  const getLogs = opts.getLogs ?? ((range) => client.getLogs(range));
   if (opts.from > opts.to) {
     return { logs: [], scannedTo: opts.to, failed: false };
   }
@@ -210,7 +283,7 @@ export async function scanLogsForward(opts: {
     const batch = ranges.slice(i, i + concurrency);
     const results = await Promise.allSettled(
       batch.map((r) =>
-        client.getLogs({ address: opts.address, fromBlock: r.from, toBlock: r.to }),
+        getLogs({ address: opts.address, fromBlock: r.from, toBlock: r.to }),
       ),
     );
     // Advance the frontier only across the LEADING run of successful pages. A

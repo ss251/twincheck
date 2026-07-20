@@ -107,54 +107,111 @@ describe("dualReportExitCode", () => {
     expect(dualReportExitCode(outcome({ rB: unverified }))).toBe(1);
   });
 
-  test("returns indeterminate when either principal refused to report", () => {
-    expect(dualReportExitCode(outcome({ reportedA: false }))).toBe(2);
-    expect(dualReportExitCode(outcome({ reportedB: false }))).toBe(2);
-    expect(
-      dualReportExitCode(outcome({ reportedA: false, reportedB: false })),
-    ).toBe(2);
+  test("returns indeterminate when either current probe failed", () => {
+    const indeterminate = { ...verified, scanError: true };
+    expect(dualReportExitCode(outcome({ rA: indeterminate }))).toBe(2);
+    expect(dualReportExitCode(outcome({ rB: indeterminate }))).toBe(2);
   });
 });
 
 describe("dualReport", () => {
-  test("recognizes a settlement emitted by principal A", async () => {
+  test("re-reports A when its first report consumed a stale B observation", async () => {
     const probes = [verified, verified];
     const receipts = [
       { hash: txHash, receipt: { logs: [settlementLog(evidenceHash)] } },
       { hash: txHash, receipt: { logs: [] } },
+      { hash: txHash, receipt: { logs: [settlementLog(evidenceHash)] } },
     ];
-    const deps: DualReportDependencies = {
-      readCard: async () => watchedCard,
-      watchBatch: async () => txHash,
-      probeDual: async () => probes.shift()!,
-      reportOne: async () => receipts.shift()!,
-    };
-
-    const out = await dualReport(cfg, target, deps);
-
-    expect(out.settledThisRun).toBe(true);
-    expect(dualReportExitCode(out)).toBe(0);
-  });
-
-  test("returns an outcome when both probes are indeterminate", async () => {
-    const indeterminate = {
-      ...verified,
-      scanOK: false,
-      scanError: true,
-      scanSignal: "http_524",
-    };
-    const probes = [indeterminate, indeterminate];
+    let reportCalls = 0;
     const deps: DualReportDependencies = {
       readCard: async () => watchedCard,
       watchBatch: async () => txHash,
       probeDual: async () => probes.shift()!,
       reportOne: async () => {
+        reportCalls++;
+        return receipts.shift()!;
+      },
+    };
+
+    const out = await dualReport(cfg, target, deps);
+
+    expect(reportCalls).toBe(3);
+    expect(out.settledThisRun).toBe(true);
+    expect(dualReportExitCode(out)).toBe(0);
+  });
+
+  test("accepts B settlement without an extra report", async () => {
+    const probes = [verified, verified];
+    const receipts = [
+      { hash: txHash, receipt: { logs: [] } },
+      { hash: txHash, receipt: { logs: [settlementLog(evidenceHash)] } },
+    ];
+    let reportCalls = 0;
+    const steps: string[] = [];
+    const deps: DualReportDependencies = {
+      readCard: async () => watchedCard,
+      watchBatch: async () => txHash,
+      probeDual: async () => {
+        steps.push("probe");
+        return probes.shift()!;
+      },
+      reportOne: async () => {
+        steps.push("report");
+        reportCalls++;
+        return receipts.shift()!;
+      },
+    };
+
+    const out = await dualReport(cfg, target, deps);
+
+    expect(reportCalls).toBe(2);
+    expect(steps).toEqual(["probe", "probe", "report", "report"]);
+    expect(out.settledThisRun).toBe(true);
+  });
+
+  test("does not report when current probes disagree", async () => {
+    const probes = [verified, { ...verified, visionOK: false }];
+    let reportCalls = 0;
+    const deps: DualReportDependencies = {
+      readCard: async () => watchedCard,
+      watchBatch: async () => txHash,
+      probeDual: async () => probes.shift()!,
+      reportOne: async () => {
+        reportCalls++;
         throw new Error("reportOne must not be called");
       },
     };
 
     const out = await dualReport(cfg, target, deps);
 
+    expect(reportCalls).toBe(0);
+    expect(out.reportedA).toBe(false);
+    expect(out.reportedB).toBe(false);
+    expect(dualReportExitCode(out)).toBe(1);
+  });
+
+  test("does not report A when B's current probe is indeterminate", async () => {
+    const indeterminate = {
+      ...verified,
+      scanOK: false,
+      scanError: true,
+      scanSignal: "http_524",
+    };
+    const probes = [verified, indeterminate];
+    let reportCalls = 0;
+    const deps: DualReportDependencies = {
+      readCard: async () => watchedCard,
+      watchBatch: async () => txHash,
+      probeDual: async () => probes.shift()!,
+      reportOne: async () => {
+        reportCalls++;
+        throw new Error("reportOne must not be called");
+      },
+    };
+
+    const out = await dualReport(cfg, target, deps);
+
+    expect(reportCalls).toBe(0);
     expect(out.reportedA).toBe(false);
     expect(out.reportedB).toBe(false);
     expect(dualReportExitCode(out)).toBe(2);

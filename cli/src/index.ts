@@ -224,57 +224,74 @@ export async function dualReport(
     { label: "B", key: cfg.keyB },
   ] as const;
 
-  const results: DualResult[] = [];
-  const reported: boolean[] = [];
+  const results = await Promise.all(
+    principals.map(async (p) => {
+      const r = await deps.probeDual(target, cfg);
+      printDual(r, `principal ${p.label}`);
+      return r;
+    }),
+  );
+  const reported = [false, false];
   let settledThisRun = false;
-  for (const p of principals) {
-    const r = await deps.probeDual(target, cfg);
-    printDual(r, `principal ${p.label}`);
-    results.push(r);
+  for (let i = 0; i < principals.length; i++) {
+    const p = principals[i];
+    const r = results[i];
     if (hasProbeError(r)) {
       console.error(
         `principal ${p.label}: refusing to attest ${target} — indeterminate probe ` +
           `(monadscan=${r.scanSignal}, monadVision=${r.visionSignal})`,
       );
-      reported.push(false);
-      continue;
     }
-    const payload = evidenceHashPayload(r);
-    const eh = hashEvidence(payload);
-    console.log(`principal ${p.label} evidenceHash ${eh}`);
-    console.log(`principal ${p.label} payload ${payload}`);
-    const report = await deps.reportOne(
-      cfg,
-      p.key,
-      target,
-      r.scanOK,
-      r.visionOK,
-      eh,
-    );
-    console.log(`report ${p.label} ${txUrl(cfg, report.hash)}`);
-    reported.push(true);
-    settledThisRun =
-      settledThisRun ||
-      hasMatchingSettlement(
+  }
+
+  const [rA, rB] = results;
+  const determinate = !hasProbeError(rA) && !hasProbeError(rB);
+  const agrees = rA.scanOK === rB.scanOK && rA.visionOK === rB.visionOK;
+  if (determinate && agrees) {
+    const evidence = results.map((r, i) => {
+      const payload = evidenceHashPayload(r);
+      const hash = hashEvidence(payload);
+      console.log(`principal ${principals[i].label} evidenceHash ${hash}`);
+      console.log(`principal ${principals[i].label} payload ${payload}`);
+      return hash;
+    });
+    const submit = async (i: number): Promise<boolean> => {
+      const p = principals[i];
+      const r = results[i];
+      const report = await deps.reportOne(
+        cfg,
+        p.key,
+        target,
+        r.scanOK,
+        r.visionOK,
+        evidence[i],
+      );
+      console.log(`report ${p.label} ${txUrl(cfg, report.hash)}`);
+      reported[i] = true;
+      return hasMatchingSettlement(
         report.receipt.logs,
         cfg.twin,
         target,
         r.scanOK,
         r.visionOK,
       );
+    };
+
+    await submit(0);
+    settledThisRun = await submit(1);
+    if (!settledThisRun) settledThisRun = await submit(0);
   }
 
-  if (!reported[0] && !reported[1]) {
+  if (!determinate) {
     console.error(
-      `no attestation for ${target}: both principals had indeterminate probes. ` +
+      `no attestation for ${target}: at least one principal had an indeterminate probe. ` +
         `Transient explorer failures must not be recorded on-chain as "unverified".`,
     );
   }
-  const [rA, rB] = results;
-  if (reported[0] && reported[1] && (rA.scanOK !== rB.scanOK || rA.visionOK !== rB.visionOK)) {
+  if (determinate && !agrees) {
     console.error(
       `principals disagree on ${target} (A: scan=${rA.scanOK}/vision=${rA.visionOK}, ` +
-        `B: scan=${rB.scanOK}/vision=${rB.visionOK}) — card stays unsettled until they agree`,
+        `B: scan=${rB.scanOK}/vision=${rB.visionOK}) — refusing to submit either report`,
     );
   }
 
@@ -318,7 +335,7 @@ async function cmdCheck(flags: Record<string, string | boolean>) {
 }
 
 export function dualReportExitCode(out: DualReportOutcome): 0 | 1 | 2 {
-  if (!out.reportedA || !out.reportedB) return 2;
+  if (hasProbeError(out.rA) || hasProbeError(out.rB)) return 2;
   return out.settledThisRun &&
     out.rA.scanOK &&
     out.rA.visionOK &&

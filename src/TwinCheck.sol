@@ -158,9 +158,8 @@ contract TwinCheck {
 
         Observation memory oa = reports[target][attestorA];
         Observation memory ob = reports[target][attestorB];
-        // Wait until both attestors have posted matching bits. A solo re-report
-        // after a prior settle must not revert — the other principal still has
-        // the old observation until they re-check.
+        // Wait until both attestors have posted matching bits. After a settlement
+        // consumes both observations, a solo re-report waits for a fresh counterpart.
         if (!oa.exists || !ob.exists) return;
         uint64 oldestReport = oa.reportedAt < ob.reportedAt ? oa.reportedAt : ob.reportedAt;
         if (uint64(block.timestamp) - oldestReport > MAX_REPORT_AGE) return;

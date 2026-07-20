@@ -1,14 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import type { Address, Hex } from "viem";
+import {
+  encodeAbiParameters,
+  encodeEventTopics,
+  getAddress,
+  type Address,
+  type Hex,
+  type Log,
+} from "viem";
 import {
   classifyPendingReports,
   comparePulseEventsNewestFirst,
+  decodeFeedLog,
+  pulseEvent,
   reconcileFeedEvents,
   reconcileFeedHead,
+  scanLogsForward,
   type PulseEvent,
 } from "../src/chain";
 
-const target = "0xAbC0000000000000000000000000000000000001" as Address;
+const target = "0xabc0000000000000000000000000000000000001" as Address;
 
 function event(key: string, blockNumber: bigint, logIndex = 0): PulseEvent {
   return {
@@ -117,5 +127,92 @@ describe("comparePulseEventsNewestFirst", () => {
         .sort(comparePulseEventsNewestFirst)
         .map((item) => item.key),
     ).toEqual(["3", "2", "1"]);
+  });
+});
+
+describe("scanLogsForward", () => {
+  test("stops before a failed page and resumes without a gap", async () => {
+    const attempts = new Map<bigint, number>();
+    const getLogs = async ({ fromBlock }: { fromBlock: bigint }): Promise<Log[]> => {
+      const attempt = (attempts.get(fromBlock) ?? 0) + 1;
+      attempts.set(fromBlock, attempt);
+      if (fromBlock === 1_100n && attempt === 1) throw new Error("temporary RPC failure");
+      return [{ blockNumber: fromBlock } as Log];
+    };
+
+    const first = await scanLogsForward({
+      address: target,
+      from: 1_000n,
+      to: 1_299n,
+      concurrency: 3,
+      getLogs,
+    });
+    expect(first.failed).toBe(true);
+    expect(first.scannedTo).toBe(1_099n);
+    expect(first.logs.map((log) => log.blockNumber)).toEqual([1_000n]);
+
+    const resumed = await scanLogsForward({
+      address: target,
+      from: first.scannedTo + 1n,
+      to: 1_299n,
+      concurrency: 2,
+      getLogs,
+    });
+    expect(resumed.failed).toBe(false);
+    expect(resumed.scannedTo).toBe(1_299n);
+    expect(resumed.logs.map((log) => log.blockNumber)).toEqual([1_100n, 1_200n]);
+    expect(attempts.get(1_200n)).toBe(2);
+  });
+});
+
+describe("decodeFeedLog", () => {
+  test("decodes a pulse into a stable feed event", () => {
+    const tx = `0x${"12".repeat(32)}` as Hex;
+    const log = {
+      address: target,
+      blockNumber: 1_234n,
+      transactionHash: tx,
+      logIndex: 7,
+      topics: encodeEventTopics({
+        abi: [pulseEvent],
+        eventName: "DualStatusPulse",
+        args: { target },
+      }),
+      data: encodeAbiParameters(
+        [
+          { type: "bool" },
+          { type: "bool" },
+          { type: "bool" },
+          { type: "bool" },
+          { type: "bool" },
+          { type: "uint64" },
+        ],
+        [false, false, true, true, true, 1_700_000_000n],
+      ),
+    } as Log;
+
+    expect(decodeFeedLog(log)).toEqual({
+      key: `${tx}:7`,
+      kind: "Pulse",
+      target: getAddress(target),
+      prevScanOK: false,
+      prevVisionOK: false,
+      scanOK: true,
+      visionOK: true,
+      dualOK: true,
+      at: 1_700_000_000,
+      tx,
+      blockNumber: 1_234n,
+      logIndex: 7,
+    });
+  });
+
+  test("ignores unrelated logs", () => {
+    expect(
+      decodeFeedLog({
+        topics: [`0x${"ff".repeat(32)}`],
+        data: "0x",
+      } as Log),
+    ).toBeNull();
   });
 });

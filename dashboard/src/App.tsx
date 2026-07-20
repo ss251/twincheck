@@ -4,10 +4,7 @@ import {
   MONAD_CHAIN_ID,
   client,
   twinAbi,
-  watchedEvent,
-  reportedEvent,
-  settledEvent,
-  pulseEvent,
+  decodeFeedLog,
   scanLogsForward,
   reconcileFeedEvents,
   reconcileFeedHead,
@@ -26,7 +23,7 @@ import {
   EXPLORER,
   SCAN,
 } from "./chain";
-import { decodeEventLog, type Address, type Hex, type Log } from "viem";
+import { type Address, type Hex } from "viem";
 
 type Awaiting = PendingReportState | null;
 
@@ -42,84 +39,6 @@ type CardRow = {
   /** For never-settled cards: which attestor's report is still missing. */
   awaiting: Awaiting;
 };
-
-const EVENTS = [watchedEvent, reportedEvent, settledEvent, pulseEvent] as const;
-
-function decodeAny(log: Log): PulseEvent | null {
-  for (const abi of EVENTS) {
-    try {
-      const d = decodeEventLog({
-        abi: [abi],
-        data: log.data,
-        topics: log.topics as [Hex, ...Hex[]],
-      });
-      const args = d.args as any;
-      const tx = log.transactionHash as Hex;
-      const blockNumber = log.blockNumber ?? 0n;
-      const logIndex = Number(log.logIndex ?? 0);
-      const key = `${tx}:${logIndex}`;
-      if (d.eventName === "DualStatusPulse") {
-        return {
-          key,
-          kind: "Pulse",
-          target: args.target,
-          prevScanOK: args.prevScanOK,
-          prevVisionOK: args.prevVisionOK,
-          scanOK: args.scanOK,
-          visionOK: args.visionOK,
-          dualOK: args.dualOK,
-          at: Number(args.checkedAt),
-          tx,
-          blockNumber,
-          logIndex,
-        };
-      }
-      if (d.eventName === "DualStatusSettled") {
-        return {
-          key,
-          kind: "Settled",
-          target: args.target,
-          scanOK: args.scanOK,
-          visionOK: args.visionOK,
-          dualOK: args.dualOK,
-          at: Number(args.checkedAt),
-          tx,
-          blockNumber,
-          logIndex,
-        };
-      }
-      if (d.eventName === "Reported") {
-        return {
-          key,
-          kind: "Reported",
-          target: args.target,
-          attestor: args.attestor,
-          scanOK: args.scanOK,
-          visionOK: args.visionOK,
-          at: Number(args.at),
-          tx,
-          blockNumber,
-          logIndex,
-        };
-      }
-      if (d.eventName === "Watched") {
-        return {
-          key,
-          kind: "Watched",
-          target: args.target,
-          attestor: args.by,
-          at: Number(args.at),
-          tx,
-          blockNumber,
-          logIndex,
-        };
-      }
-    } catch {
-      /* try next */
-    }
-  }
-  return null;
-}
 
 type CardState = "pending" | "dual" | "split" | "fail";
 
@@ -391,7 +310,7 @@ export default function App() {
         if (scannedTo >= from) {
           const replacements: PulseEvent[] = [];
           for (const log of logs) {
-            const event = decodeAny(log);
+            const event = decodeFeedLog(log);
             if (event) replacements.push(event);
           }
           const replaceTo =
