@@ -38,10 +38,3 @@
 | `0x93FE94…F66` (#369 example) | true | true | true | Mainnet registry dual OK |
 | Cycle ZkEVM | true | true | true | Registry sample |
 | Cycle bridge | false | false | false | Unverified both |
-
-### Historical (dead — not submission)
-
-| Contract | Address |
-|----------|---------|
-| DoneStamp | `0x6e234b4839641158B4E88Db59037B178BfcC31C8` |
-| FleetLedger | `0x3CE554b355002d6cc5d07Dd670c149815aFa3d14` |

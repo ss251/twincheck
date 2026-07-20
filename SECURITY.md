@@ -1,6 +1,6 @@
 # TwinCheck security notes (solidity-auditor pass)
 
-Scope: `src/TwinCheck.sol` only (new product). Dead `DoneStamp` / `FleetLedger` out of scope.
+Scope: `src/TwinCheck.sol`.
 
 ## Threat model
 

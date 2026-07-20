@@ -9,7 +9,7 @@
  *   twincheck card    — read settled card from chain
  *   twincheck run     — sample registry, watch, dual-report (demo path)
  */
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import {
   getConfig,
   getProbeConfig,
@@ -19,7 +19,9 @@ import {
 } from "./config";
 import {
   getCode,
+  hasMatchingSettlement,
   hashEvidence,
+  hashDualEvidence,
   readCard,
   reportOne,
   watchBatch,
@@ -144,8 +146,9 @@ export type DualReportOutcome = {
   rB: DualResult;
   reportedA: boolean;
   reportedB: boolean;
-  settled: boolean;
-  dualOK: boolean;
+  settledThisRun: boolean;
+  cardSettled: boolean;
+  cardDualOK: boolean;
 };
 
 /**
@@ -173,6 +176,8 @@ async function dualReport(
 
   const results: DualResult[] = [];
   const reported: boolean[] = [];
+  const evidenceHashes: Hex[] = [];
+  let settledThisRun = false;
   for (const p of principals) {
     const r = await probeDual(target, cfg);
     printDual(r, `principal ${p.label}`);
@@ -187,11 +192,27 @@ async function dualReport(
     }
     const payload = evidenceHashPayload(r);
     const eh = hashEvidence(payload);
+    evidenceHashes.push(eh);
     console.log(`principal ${p.label} evidenceHash ${eh}`);
     console.log(`principal ${p.label} payload ${payload}`);
-    const h = await reportOne(cfg, p.key, target, r.scanOK, r.visionOK, eh);
-    console.log(`report ${p.label} ${txUrl(cfg, h)}`);
+    const report = await reportOne(cfg, p.key, target, r.scanOK, r.visionOK, eh);
+    console.log(`report ${p.label} ${txUrl(cfg, report.hash)}`);
     reported.push(true);
+    if (
+      p.label === "B" &&
+      reported[0] &&
+      results[0].scanOK === r.scanOK &&
+      results[0].visionOK === r.visionOK
+    ) {
+      settledThisRun = hasMatchingSettlement(
+        report.receipt.logs,
+        cfg.twin,
+        target,
+        r.scanOK,
+        r.visionOK,
+        hashDualEvidence(evidenceHashes[0], eh),
+      );
+    }
   }
 
   if (!reported[0] && !reported[1]) {
@@ -230,8 +251,9 @@ async function dualReport(
     rB,
     reportedA: reported[0],
     reportedB: reported[1],
-    settled: Boolean(after[1]),
-    dualOK: Boolean(after[4]),
+    settledThisRun,
+    cardSettled: Boolean(after[1]),
+    cardDualOK: Boolean(after[4]),
   };
 }
 
@@ -247,9 +269,7 @@ async function cmdCheck(flags: Record<string, string | boolean>) {
 
 export function dualReportExitCode(out: DualReportOutcome): 0 | 1 | 2 {
   if (!out.reportedA || !out.reportedB) return 2;
-  const agrees =
-    out.rA.scanOK === out.rB.scanOK && out.rA.visionOK === out.rB.visionOK;
-  return agrees && out.rA.scanOK && out.rA.visionOK ? 0 : 1;
+  return out.settledThisRun && out.rA.scanOK && out.rA.visionOK ? 0 : 1;
 }
 
 async function cmdCard(flags: Record<string, string | boolean>) {

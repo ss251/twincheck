@@ -122,8 +122,33 @@ export type PulseEvent = {
   attestor?: Address;
   tx: Hex;
   blockNumber: bigint;
+  logIndex: number;
   at?: number;
 };
+
+export type PendingReportState = "A" | "B" | "both" | "disagree" | "stale";
+
+export function classifyPendingReports(
+  a: { scanOK: boolean; visionOK: boolean; exists: boolean },
+  b: { scanOK: boolean; visionOK: boolean; exists: boolean },
+): PendingReportState {
+  if (!a.exists && !b.exists) return "both";
+  if (!a.exists) return "A";
+  if (!b.exists) return "B";
+  return a.scanOK !== b.scanOK || a.visionOK !== b.visionOK
+    ? "disagree"
+    : "stale";
+}
+
+export function comparePulseEventsNewestFirst(
+  a: PulseEvent,
+  b: PulseEvent,
+): number {
+  if (a.blockNumber !== b.blockNumber) {
+    return a.blockNumber > b.blockNumber ? -1 : 1;
+  }
+  return b.logIndex - a.logIndex;
+}
 
 export function shortAddr(a: string): string {
   return a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "—";
@@ -236,7 +261,7 @@ type FeedCacheShape = {
 // Bump whenever the scan's start block or event shape changes — a stale cached
 // frontier from an earlier DEPLOY_BLOCK would otherwise skip the backfill and
 // leave the feed permanently empty.
-const FEED_CACHE_VERSION = 3;
+const FEED_CACHE_VERSION = 4;
 
 function feedCacheKey(): string {
   return `twincheck.feed.v${FEED_CACHE_VERSION}.${MONAD_CHAIN_ID}.${TWIN.toLowerCase()}`;

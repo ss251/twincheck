@@ -21,8 +21,9 @@ function outcome(overrides: Partial<DualReportOutcome> = {}): DualReportOutcome 
     rB: verified,
     reportedA: true,
     reportedB: true,
-    settled: true,
-    dualOK: true,
+    settledThisRun: true,
+    cardSettled: true,
+    cardDualOK: true,
     ...overrides,
   };
 }
@@ -30,11 +31,16 @@ function outcome(overrides: Partial<DualReportOutcome> = {}): DualReportOutcome 
 describe("dualReportExitCode", () => {
   test("uses current agreement instead of a stale successful card", () => {
     const disagreeing = { ...verified, visionOK: false };
-    expect(dualReportExitCode(outcome({ rB: disagreeing, dualOK: true }))).toBe(1);
+    expect(
+      dualReportExitCode(
+        outcome({ rB: disagreeing, settledThisRun: false, cardDualOK: true }),
+      ),
+    ).toBe(1);
   });
 
-  test("returns success only for current matching dual verification", () => {
+  test("returns success only for a proven current dual settlement", () => {
     expect(dualReportExitCode(outcome())).toBe(0);
+    expect(dualReportExitCode(outcome({ settledThisRun: false }))).toBe(1);
     const unverified = { ...verified, scanOK: false, visionOK: false };
     expect(dualReportExitCode(outcome({ rA: unverified, rB: unverified }))).toBe(1);
   });

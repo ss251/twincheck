@@ -10,11 +10,14 @@ import {
   pulseEvent,
   scanLogsForward,
   reconcileFeedEvents,
+  comparePulseEventsNewestFirst,
+  classifyPendingReports,
   loadFeedCache,
   saveFeedCache,
   DEPLOY_BLOCK,
   REORG_OVERLAP_BLOCKS,
   type PulseEvent,
+  type PendingReportState,
   shortAddr,
   explorerTx,
   explorerAddr,
@@ -24,7 +27,7 @@ import {
 } from "./chain";
 import { decodeEventLog, type Address, type Hex, type Log } from "viem";
 
-type Awaiting = "A" | "B" | "both" | "disagree" | null;
+type Awaiting = PendingReportState | null;
 
 type CardRow = {
   target: Address;
@@ -52,7 +55,8 @@ function decodeAny(log: Log): PulseEvent | null {
       const args = d.args as any;
       const tx = log.transactionHash as Hex;
       const blockNumber = log.blockNumber ?? 0n;
-      const key = `${tx}:${log.logIndex ?? 0}`;
+      const logIndex = Number(log.logIndex ?? 0);
+      const key = `${tx}:${logIndex}`;
       if (d.eventName === "DualStatusPulse") {
         return {
           key,
@@ -66,6 +70,7 @@ function decodeAny(log: Log): PulseEvent | null {
           at: Number(args.checkedAt),
           tx,
           blockNumber,
+          logIndex,
         };
       }
       if (d.eventName === "DualStatusSettled") {
@@ -79,6 +84,7 @@ function decodeAny(log: Log): PulseEvent | null {
           at: Number(args.checkedAt),
           tx,
           blockNumber,
+          logIndex,
         };
       }
       if (d.eventName === "Reported") {
@@ -92,6 +98,7 @@ function decodeAny(log: Log): PulseEvent | null {
           at: Number(args.at),
           tx,
           blockNumber,
+          logIndex,
         };
       }
       if (d.eventName === "Watched") {
@@ -103,6 +110,7 @@ function decodeAny(log: Log): PulseEvent | null {
           at: Number(args.at),
           tx,
           blockNumber,
+          logIndex,
         };
       }
     } catch {
@@ -208,6 +216,8 @@ function awaitingText(
     return `awaiting attestor B${attestors ? ` · ${shortAddr(attestors.b)}` : ""}`;
   if (c.awaiting === "disagree")
     return "attestors disagree — awaiting matching re-checks";
+  if (c.awaiting === "stale")
+    return "matching reports missed the settlement window — re-check required";
   return "awaiting both attestors";
 }
 
@@ -390,8 +400,8 @@ export default function App() {
         saveFeedCache(frontierRef.current, [...feedMapRef.current.values()]);
       }
       setBackfilling(frontierRef.current < latest);
-      const events = [...feedMapRef.current.values()].sort((x, y) =>
-        Number(y.blockNumber - x.blockNumber),
+      const events = [...feedMapRef.current.values()].sort(
+        comparePulseEventsNewestFirst,
       );
       return events;
     },
@@ -429,12 +439,10 @@ export default function App() {
           args: [target, att.b],
         }),
       ]);
-      const aExists = ra[4];
-      const bExists = rb[4];
-      if (!aExists && !bExists) awaiting = "both";
-      else if (!aExists) awaiting = "A";
-      else if (!bExists) awaiting = "B";
-      else awaiting = "disagree"; // both posted, bits differ — not settled
+      awaiting = classifyPendingReports(
+        { scanOK: ra[0], visionOK: ra[1], exists: ra[4] },
+        { scanOK: rb[0], visionOK: rb[1], exists: rb[4] },
+      );
     }
     return {
       target,
@@ -528,25 +536,31 @@ export default function App() {
           targetsRef.current.push(t);
         }
 
+        const feedPromise = advanceFeed(latest)
+          .then((events) => setFeed(events.slice(0, 80)))
+          .catch(() => undefined);
+
         // Cards come from contract STATE (watchedCount/watchedAt) — they must
-        // paint immediately and never wait on the historical log scan below.
+        // paint immediately and never wait on the historical log scan.
         const cardTargets = new Map<string, Address>();
         for (const t of targetsRef.current) cardTargets.set(t.toLowerCase(), t);
         const rows: CardRow[] = [];
-        for (const t of cardTargets.values()) rows.push(await readCardRow(t));
-        if (rows.length > 0 || initial) applyRows(rows);
-        setError(null);
-        if (initial) setLoading(false); // cards are live; the feed fills in behind
-
-        // The pulse feed is a background history scan. A slow cold backfill (or
-        // a transient RPC failure) must NEVER gate or blank the cards above, so
-        // it runs isolated from contract-state refreshes.
-        try {
-          const events = await advanceFeed(latest);
-          setFeed(events.slice(0, 80));
-        } catch {
-          /* feed is best-effort — the cards are already rendered */
+        let failedRows = 0;
+        for (const t of cardTargets.values()) {
+          try {
+            rows.push(await readCardRow(t));
+          } catch {
+            failedRows++;
+          }
         }
+        if (rows.length > 0 || initial) applyRows(rows);
+        setError(
+          failedRows > 0
+            ? `${failedRows} card${failedRows === 1 ? "" : "s"} could not be refreshed.`
+            : null,
+        );
+        if (initial) setLoading(false); // cards are live; the feed fills in behind
+        await feedPromise;
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
