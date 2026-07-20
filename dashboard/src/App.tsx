@@ -4,12 +4,18 @@ import {
   MONAD_CHAIN_ID,
   client,
   twinAbi,
-  watchedEvent,
-  reportedEvent,
-  settledEvent,
-  pulseEvent,
-  getAllLogsPaged,
+  decodeFeedLog,
+  scanLogsForward,
+  reconcileFeedEvents,
+  reconcileFeedHead,
+  comparePulseEventsNewestFirst,
+  classifyPendingReports,
+  loadFeedCache,
+  saveFeedCache,
+  DEPLOY_BLOCK,
+  REORG_OVERLAP_BLOCKS,
   type PulseEvent,
+  type PendingReportState,
   shortAddr,
   explorerTx,
   explorerAddr,
@@ -17,7 +23,9 @@ import {
   EXPLORER,
   SCAN,
 } from "./chain";
-import { decodeEventLog, type Address, type Hex, type Log } from "viem";
+import { type Address, type Hex } from "viem";
+
+type Awaiting = PendingReportState | null;
 
 type CardRow = {
   target: Address;
@@ -28,75 +36,9 @@ type CardRow = {
   dualOK: boolean;
   checkedAt: number;
   evidenceHash: Hex;
+  /** For never-settled cards: which attestor's report is still missing. */
+  awaiting: Awaiting;
 };
-
-const EVENTS = [watchedEvent, reportedEvent, settledEvent, pulseEvent] as const;
-
-function decodeAny(log: Log): PulseEvent | null {
-  for (const abi of EVENTS) {
-    try {
-      const d = decodeEventLog({
-        abi: [abi],
-        data: log.data,
-        topics: log.topics as [Hex, ...Hex[]],
-      });
-      const args = d.args as any;
-      const tx = log.transactionHash as Hex;
-      const blockNumber = log.blockNumber ?? 0n;
-      if (d.eventName === "DualStatusPulse") {
-        return {
-          kind: "Pulse",
-          target: args.target,
-          prevScanOK: args.prevScanOK,
-          prevVisionOK: args.prevVisionOK,
-          scanOK: args.scanOK,
-          visionOK: args.visionOK,
-          dualOK: args.dualOK,
-          at: Number(args.checkedAt),
-          tx,
-          blockNumber,
-        };
-      }
-      if (d.eventName === "DualStatusSettled") {
-        return {
-          kind: "Settled",
-          target: args.target,
-          scanOK: args.scanOK,
-          visionOK: args.visionOK,
-          dualOK: args.dualOK,
-          at: Number(args.checkedAt),
-          tx,
-          blockNumber,
-        };
-      }
-      if (d.eventName === "Reported") {
-        return {
-          kind: "Reported",
-          target: args.target,
-          attestor: args.attestor,
-          scanOK: args.scanOK,
-          visionOK: args.visionOK,
-          at: Number(args.at),
-          tx,
-          blockNumber,
-        };
-      }
-      if (d.eventName === "Watched") {
-        return {
-          kind: "Watched",
-          target: args.target,
-          attestor: args.by,
-          at: Number(args.at),
-          tx,
-          blockNumber,
-        };
-      }
-    } catch {
-      /* try next */
-    }
-  }
-  return null;
-}
 
 type CardState = "pending" | "dual" | "split" | "fail";
 
@@ -180,14 +122,35 @@ function Half({
   );
 }
 
+const FOUNDRY_VERIFY_DOCS =
+  "https://docs.monad.xyz/guides/verify-smart-contract/foundry";
+const SOURCIFY_VERIFIER = "https://sourcify.dev/#/verifier";
+
+function awaitingText(
+  c: CardRow,
+  attestors: { a: string; b: string } | null,
+): string {
+  if (c.awaiting === "A")
+    return `awaiting attestor A${attestors ? ` · ${shortAddr(attestors.a)}` : ""}`;
+  if (c.awaiting === "B")
+    return `awaiting attestor B${attestors ? ` · ${shortAddr(attestors.b)}` : ""}`;
+  if (c.awaiting === "disagree")
+    return "attestors disagree — awaiting matching re-checks";
+  if (c.awaiting === "stale")
+    return "matching reports missed the settlement window — re-check required";
+  return "awaiting both attestors";
+}
+
 function TwinCard({
   c,
   index,
   flipped,
+  attestors,
 }: {
   c: CardRow;
   index: number;
   flipped: boolean;
+  attestors: { a: string; b: string } | null;
 }) {
   const state = stateOf(c);
   const v = VERDICT[state];
@@ -223,9 +186,30 @@ function TwinCard({
         <Half side="l" label="Monadscan" ok={c.scanOK} settled={c.settled} />
         <Half side="r" label="MonadVision" ok={c.visionOK} settled={c.settled} />
       </div>
+      {state === "fail" && (
+        <p className="agree-note">
+          The twins agree — unverified on <em>both</em> explorers.
+        </p>
+      )}
+      {c.settled && !c.scanOK && (
+        <p className="remedy">
+          Monadscan fix:{" "}
+          <a href={FOUNDRY_VERIFY_DOCS} target="_blank" rel="noreferrer">
+            forge verify with an Etherscan API key ↗
+          </a>
+        </p>
+      )}
+      {c.settled && !c.visionOK && (
+        <p className="remedy">
+          MonadVision fix:{" "}
+          <a href={SOURCIFY_VERIFIER} target="_blank" rel="noreferrer">
+            submit source via Sourcify ↗
+          </a>
+        </p>
+      )}
       <footer className="tcard-foot">
         <span>
-          {c.settled ? `settled ${fmtWhen(c.checkedAt)}` : "awaiting dual attestors"}
+          {c.settled ? `settled ${fmtWhen(c.checkedAt)}` : awaitingText(c, attestors)}
         </span>
         <span className="links">
           <a href={scanAddr(c.target)} target="_blank" rel="noreferrer">
@@ -265,115 +249,307 @@ export default function App() {
   const [block, setBlock] = useState<bigint>(0n);
   const [flipped, setFlipped] = useState<Set<string>>(new Set());
   const prevStates = useRef<Map<string, CardState>>(new Map());
+  // Feed scan frontier: every block in [DEPLOY_BLOCK, frontier] has been
+  // scanned for events (in this browser — persisted in localStorage).
+  const frontierRef = useRef<bigint | null>(null);
+  const feedMapRef = useRef<Map<string, PulseEvent>>(new Map());
+  const [backfilling, setBackfilling] = useState(false);
+  const [feedReady, setFeedReady] = useState(false);
+  const [feedError, setFeedError] = useState<string | null>(null);
 
   const configured = TWIN !== "0x0000000000000000000000000000000000000000";
 
-  const load = useCallback(async () => {
-    if (!configured) {
-      setError("Set VITE_TWINCHECK to the deployed TwinCheck address.");
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const code = await client.getCode({ address: TWIN });
-      if (!code || code === "0x") {
-        throw new Error(`No contract code at ${TWIN}`);
+  /**
+   * Scan the next slice of history, merge events, persist, and return all known
+   * events newest first.
+   */
+  const advanceFeed = useCallback(
+    async (latest: bigint): Promise<PulseEvent[]> => {
+      if (frontierRef.current === null) {
+        const cached = loadFeedCache();
+        frontierRef.current = cached ? cached.frontier : DEPLOY_BLOCK - 1n;
+        if (cached) {
+          for (const e of cached.events) feedMapRef.current.set(e.key, e);
+        }
       }
-      const [a, b, count, latest] = await Promise.all([
+      const normalized = reconcileFeedHead(
+        feedMapRef.current.values(),
+        frontierRef.current,
+        latest,
+      );
+      if (normalized.rescanFrom !== null || normalized.frontier !== frontierRef.current) {
+        frontierRef.current = normalized.frontier;
+        feedMapRef.current = new Map(
+          normalized.events.map((event) => [event.key, event]),
+        );
+        saveFeedCache(frontierRef.current, normalized.events);
+      }
+      const previousFrontier = frontierRef.current;
+      let incomplete = false;
+      const nearHeadThreshold =
+        latest > REORG_OVERLAP_BLOCKS ? latest - REORG_OVERLAP_BLOCKS : 0n;
+      const from =
+        normalized.rescanFrom ??
+        (previousFrontier >= nearHeadThreshold
+          ? previousFrontier >= DEPLOY_BLOCK + REORG_OVERLAP_BLOCKS
+            ? previousFrontier - REORG_OVERLAP_BLOCKS + 1n
+            : DEPLOY_BLOCK
+          : previousFrontier + 1n);
+      if (from <= latest) {
+        // First pass stays SMALL so the event cluster (right after deploy)
+        // surfaces within seconds instead of being withheld behind a long scan
+        // of empty blocks. Once events are loaded, widen the budget to grind the
+        // empty tail up to head quickly so the "catching up" state clears.
+        const pageBudget = feedMapRef.current.size === 0 ? 100 : 600;
+        const { logs, scannedTo, failed } = await scanLogsForward({
+          address: TWIN,
+          from,
+          to: latest,
+          pageBudget,
+        });
+        if (scannedTo >= from) {
+          const replacements: PulseEvent[] = [];
+          for (const log of logs) {
+            const event = decodeFeedLog(log);
+            if (event) replacements.push(event);
+          }
+          const replaceTo =
+            scannedTo === latest && previousFrontier > latest
+              ? previousFrontier
+              : scannedTo;
+          const reconciled = reconcileFeedEvents(
+            feedMapRef.current.values(),
+            replacements,
+            from,
+            replaceTo,
+          );
+          feedMapRef.current = new Map(
+            reconciled.map((event) => [event.key, event]),
+          );
+        }
+        frontierRef.current =
+          scannedTo > previousFrontier ? scannedTo : previousFrontier;
+        saveFeedCache(frontierRef.current, [...feedMapRef.current.values()]);
+        // A transient page failure is NOT an error: the scan still made
+        // progress, already-found events are kept, and the next poll resumes at
+        // the frontier. Staying in the backfilling state shows "reading
+        // history…" (never a false "quiet/empty") without discarding the events
+        // this pass DID find. Genuine failures (e.g. getBlockNumber) surface as
+        // exceptions in the caller.
+        if (failed) incomplete = true;
+      }
+      setBackfilling(incomplete || frontierRef.current < latest);
+      const events = [...feedMapRef.current.values()].sort(
+        comparePulseEventsNewestFirst,
+      );
+      return events;
+    },
+    [],
+  );
+
+  const targetsRef = useRef<Address[]>([]);
+  const cardRowsRef = useRef<Map<string, CardRow>>(new Map());
+  const inFlight = useRef(false);
+  const feedInFlight = useRef(false);
+
+  const attestorsRef = useRef<{ a: Address; b: Address } | null>(null);
+
+  const readCardRow = useCallback(async (target: Address): Promise<CardRow> => {
+    const c = await client.readContract({
+      address: TWIN,
+      abi: twinAbi,
+      functionName: "getCard",
+      args: [target],
+    });
+    // For never-settled cards, name the attestor whose report is missing.
+    let awaiting: Awaiting = null;
+    const att = attestorsRef.current;
+    if (c[0] && !c[1] && att) {
+      const [ra, rb] = await Promise.all([
         client.readContract({
           address: TWIN,
           abi: twinAbi,
-          functionName: "attestorA",
+          functionName: "reports",
+          args: [target, att.a],
         }),
         client.readContract({
           address: TWIN,
           abi: twinAbi,
-          functionName: "attestorB",
+          functionName: "reports",
+          args: [target, att.b],
         }),
-        client.readContract({
-          address: TWIN,
-          abi: twinAbi,
-          functionName: "watchedCount",
-        }),
-        client.getBlockNumber(),
       ]);
-      setAttestors({ a, b });
-      setBlock(latest);
-
-      const n = Number(count);
-      const targets: Address[] = [];
-      for (let i = 0; i < n; i++) {
-        const t = await client.readContract({
-          address: TWIN,
-          abi: twinAbi,
-          functionName: "watchedAt",
-          args: [BigInt(i)],
-        });
-        targets.push(t);
-      }
-
-      const rows: CardRow[] = [];
-      for (const target of targets) {
-        const c = await client.readContract({
-          address: TWIN,
-          abi: twinAbi,
-          functionName: "getCard",
-          args: [target],
-        });
-        rows.push({
-          target,
-          watched: c[0],
-          settled: c[1],
-          scanOK: c[2],
-          visionOK: c[3],
-          dualOK: c[4],
-          checkedAt: Number(c[5]),
-          evidenceHash: c[6],
-        });
-      }
-
-      // status flips are the product's heartbeat — flag them for the UI
-      const prev = prevStates.current;
-      const changed = new Set<string>();
-      for (const r of rows) {
-        const s = stateOf(r);
-        const p = prev.get(r.target);
-        if (p && p !== s) changed.add(r.target);
-      }
-      prevStates.current = new Map(rows.map((r) => [r.target, stateOf(r)]));
-      if (changed.size > 0) {
-        setFlipped(changed);
-        setTimeout(() => setFlipped(new Set()), 1400);
-      }
-
-      setCards(rows);
-
-      const logs = await getAllLogsPaged({
-        address: TWIN,
-        toBlock: latest,
-        maxPages: 50,
-      });
-      const events: PulseEvent[] = [];
-      for (const log of logs) {
-        const e = decodeAny(log);
-        if (e) events.push(e);
-      }
-      events.sort((x, y) => Number(y.blockNumber - x.blockNumber));
-      setFeed(events.slice(0, 80));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
+      awaiting = classifyPendingReports(
+        { scanOK: ra[0], visionOK: ra[1], exists: ra[4] },
+        { scanOK: rb[0], visionOK: rb[1], exists: rb[4] },
+      );
     }
-  }, [configured]);
+    return {
+      target,
+      watched: c[0],
+      settled: c[1],
+      scanOK: c[2],
+      visionOK: c[3],
+      dualOK: c[4],
+      checkedAt: Number(c[5]),
+      evidenceHash: c[6],
+      awaiting,
+    };
+  }, []);
+
+  const syncFeed = useCallback(async () => {
+    if (!configured || feedInFlight.current) return;
+    feedInFlight.current = true;
+    try {
+      const latest = await client.getBlockNumber();
+      setBlock(latest);
+      const events = await advanceFeed(latest);
+      setFeed(events.slice(0, 80));
+      setFeedReady(true);
+      setFeedError(null);
+    } catch (e) {
+      if (feedMapRef.current.size === 0) {
+        const cached = loadFeedCache();
+        if (cached) {
+          frontierRef.current = cached.frontier;
+          feedMapRef.current = new Map(
+            cached.events.map((event) => [event.key, event]),
+          );
+        }
+      }
+      setFeed(
+        [...feedMapRef.current.values()]
+          .sort(comparePulseEventsNewestFirst)
+          .slice(0, 80),
+      );
+      setFeedError(e instanceof Error ? e.message : String(e));
+    } finally {
+      feedInFlight.current = false;
+    }
+  }, [configured, advanceFeed]);
+
+  /** Merge freshly-read rows, re-derive ordered card list, flag state flips. */
+  const applyRows = useCallback((rows: CardRow[]) => {
+    for (const r of rows) cardRowsRef.current.set(r.target.toLowerCase(), r);
+    const ordered = targetsRef.current
+      .map((t) => cardRowsRef.current.get(t.toLowerCase()))
+      .filter((r): r is CardRow => Boolean(r));
+
+    // status flips are the product's heartbeat — flag them for the UI
+    const prev = prevStates.current;
+    const changed = new Set<string>();
+    for (const r of ordered) {
+      const s = stateOf(r);
+      const p = prev.get(r.target);
+      if (p && p !== s) changed.add(r.target);
+    }
+    prevStates.current = new Map(ordered.map((r) => [r.target, stateOf(r)]));
+    if (changed.size > 0) {
+      setFlipped(changed);
+      setTimeout(() => setFlipped(new Set()), 1400);
+    }
+    setCards(ordered);
+  }, []);
+
+  /**
+   * initial=true: full read behind a loading screen. initial=false: quiet
+   * background pass that refreshes contract state without flashing "Syncing…".
+   */
+  const sync = useCallback(
+    async (initial: boolean) => {
+      if (!configured) {
+        setError("Set VITE_TWINCHECK to the deployed TwinCheck address.");
+        setLoading(false);
+        return;
+      }
+      if (inFlight.current) return;
+      inFlight.current = true;
+      if (initial) setLoading(true);
+      try {
+        if (initial) {
+          const code = await client.getCode({ address: TWIN });
+          if (!code || code === "0x") {
+            throw new Error(`No contract code at ${TWIN}`);
+          }
+        }
+        const [a, b, count] = await Promise.all([
+          client.readContract({
+            address: TWIN,
+            abi: twinAbi,
+            functionName: "attestorA",
+          }),
+          client.readContract({
+            address: TWIN,
+            abi: twinAbi,
+            functionName: "attestorB",
+          }),
+          client.readContract({
+            address: TWIN,
+            abi: twinAbi,
+            functionName: "watchedCount",
+          }),
+        ]);
+        attestorsRef.current = { a, b };
+        setAttestors({ a, b });
+
+        const n = Number(count);
+        const canonicalTargets: Address[] = [];
+        for (let i = 0; i < n; i++) {
+          const t = await client.readContract({
+            address: TWIN,
+            abi: twinAbi,
+            functionName: "watchedAt",
+            args: [BigInt(i)],
+          });
+          canonicalTargets.push(t);
+        }
+        targetsRef.current = canonicalTargets;
+        const canonicalKeys = new Set(
+          canonicalTargets.map((target) => target.toLowerCase()),
+        );
+        for (const key of cardRowsRef.current.keys()) {
+          if (!canonicalKeys.has(key)) cardRowsRef.current.delete(key);
+        }
+
+        // Cards come from contract STATE (watchedCount/watchedAt) — they must
+        // paint immediately and never wait on the historical log scan.
+        const cardTargets = new Map<string, Address>();
+        for (const t of targetsRef.current) cardTargets.set(t.toLowerCase(), t);
+        const rows: CardRow[] = [];
+        let failedRows = 0;
+        for (const t of cardTargets.values()) {
+          try {
+            rows.push(await readCardRow(t));
+          } catch {
+            failedRows++;
+          }
+        }
+        applyRows(rows);
+        setError(
+          failedRows > 0
+            ? `${failedRows} card${failedRows === 1 ? "" : "s"} could not be refreshed.`
+            : null,
+        );
+        if (initial) setLoading(false); // cards are live; the feed fills in behind
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (initial) setLoading(false);
+        inFlight.current = false;
+      }
+    },
+    [configured, applyRows, readCardRow],
+  );
 
   useEffect(() => {
-    load();
-    const id = setInterval(load, 20_000);
+    sync(true);
+    syncFeed();
+    const id = setInterval(() => {
+      sync(false);
+      syncFeed();
+    }, 20_000);
     return () => clearInterval(id);
-  }, [load]);
+  }, [sync, syncFeed]);
 
   const stats = useMemo(() => {
     const settled = cards.filter((c) => c.settled);
@@ -415,8 +591,16 @@ export default function App() {
                 {block.toString()}
               </span>
             </span>
-            <button type="button" className="btn" onClick={load} disabled={loading}>
-              {loading ? "Syncing…" : "Refresh"}
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                sync(false);
+                syncFeed();
+              }}
+              disabled={loading}
+            >
+              Refresh
             </button>
           </div>
         </div>
@@ -581,6 +765,7 @@ export default function App() {
                 c={c}
                 index={i}
                 flipped={flipped.has(c.target)}
+                attestors={attestors}
               />
             ))}
           </div>
@@ -591,19 +776,25 @@ export default function App() {
         <div className="section-head">
           <h2>Onchain pulse</h2>
           <span className="ledger-note">
-            live TwinCheck events · paged ≤100 blocks (Monad RPC)
+            {feedError
+              ? "feed refresh failed — cached history remains visible while retrying"
+              : backfilling
+              ? "catching up on history — the full feed since deploy fills in as older blocks are scanned"
+              : "every watch, report, settle, and flip since the contract was deployed"}
           </span>
         </div>
         <ol className="feed">
           {feed.length === 0 && (
             <li className="feed-empty">
-              Quiet — no TwinCheck events in the last ~5,000 blocks. Settled
-              verdicts hold above; new pulses land here when the attestors
-              re-check.
+              {feedError
+                ? "Pulse history is unavailable right now. TwinCheck will retry automatically."
+                : !feedReady || backfilling
+                ? "Reading event history from the chain…"
+                : "Quiet — no TwinCheck events yet. New pulses land here when the attestors re-check."}
             </li>
           )}
-          {feed.map((e, i) => (
-            <li key={`${e.tx}-${i}`} className="feed-item">
+          {feed.map((e) => (
+            <li key={e.key} className="feed-item">
               <span
                 className={
                   e.kind === "Pulse"
@@ -625,7 +816,11 @@ export default function App() {
                     <span className="arrow">→</span>
                     <Pair s={e.scanOK} v={e.visionOK} />
                     <span className={e.dualOK ? "d-word d-ok" : "d-word d-bad"}>
-                      {e.dualOK ? "dual ok" : "not dual"}
+                      {e.dualOK
+                        ? "dual ok"
+                        : e.scanOK !== e.visionOK
+                          ? "split"
+                          : "both fail"}
                     </span>
                   </>
                 )}

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "fleetmeter",
+      "name": "twincheck",
       "dependencies": {
         "viem": "^2.31.0",
       },

@@ -6,7 +6,8 @@ import {
   type Hex,
   type PublicClient,
   type WalletClient,
-  encodeFunctionData,
+  decodeEventLog,
+  encodeAbiParameters,
   keccak256,
   toBytes,
 } from "viem";
@@ -38,6 +39,43 @@ export function walletClient(cfg: TwinConfig, key: Hex): WalletClient {
     },
     transport: http(cfg.rpcUrl),
   });
+}
+
+export function assertConfiguredAttestors(
+  keyA: Hex,
+  keyB: Hex,
+  attestorA: Address,
+  attestorB: Address,
+): void {
+  const actualA = privateKeyToAccount(keyA).address;
+  const actualB = privateKeyToAccount(keyB).address;
+  if (actualA.toLowerCase() !== attestorA.toLowerCase()) {
+    throw new Error(
+      `PRIVATE_KEY must match TwinCheck attestorA ${attestorA}; got ${actualA}`,
+    );
+  }
+  if (actualB.toLowerCase() !== attestorB.toLowerCase()) {
+    throw new Error(
+      `PRINCIPAL_B_PRIVATE_KEY must match TwinCheck attestorB ${attestorB}; got ${actualB}`,
+    );
+  }
+}
+
+export async function validateAttestorConfig(cfg: TwinConfig): Promise<void> {
+  const pc = publicClient(cfg);
+  const [attestorA, attestorB] = await Promise.all([
+    pc.readContract({
+      address: cfg.twin,
+      abi: twinAbi,
+      functionName: "attestorA",
+    }),
+    pc.readContract({
+      address: cfg.twin,
+      abi: twinAbi,
+      functionName: "attestorB",
+    }),
+  ]);
+  assertConfiguredAttestors(cfg.keyA, cfg.keyB, attestorA, attestorB);
 }
 
 export async function getCode(cfg: TwinConfig, address: Address): Promise<Hex> {
@@ -96,7 +134,7 @@ export async function reportOne(
   scanOK: boolean,
   visionOK: boolean,
   evidenceHash: Hex,
-): Promise<Hex> {
+) {
   const wc = walletClient(cfg, key);
   const hash = await wc.writeContract({
     address: cfg.twin,
@@ -106,12 +144,56 @@ export async function reportOne(
     chain: wc.chain,
     account: wc.account!,
   });
-  await publicClient(cfg).waitForTransactionReceipt({ hash });
-  return hash;
+  const receipt = await publicClient(cfg).waitForTransactionReceipt({ hash });
+  if (receipt.status !== "success") {
+    throw new Error(`Report transaction reverted: ${hash}`);
+  }
+  return { hash, receipt };
 }
 
 export function hashEvidence(payload: string): Hex {
   return keccak256(toBytes(payload));
 }
 
-export { encodeFunctionData };
+export function hashDualEvidence(evidenceA: Hex, evidenceB: Hex): Hex {
+  return keccak256(
+    encodeAbiParameters(
+      [{ type: "bytes32" }, { type: "bytes32" }],
+      [evidenceA, evidenceB],
+    ),
+  );
+}
+
+export function hasMatchingSettlement(
+  logs: readonly {
+    address: Address;
+    data: Hex;
+    topics: readonly Hex[];
+  }[],
+  contract: Address,
+  target: Address,
+  scanOK: boolean,
+  visionOK: boolean,
+): boolean {
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== contract.toLowerCase()) continue;
+    try {
+      const decoded = decodeEventLog({
+        abi: twinAbi,
+        eventName: "DualStatusSettled",
+        data: log.data,
+        topics: log.topics as [Hex, ...Hex[]],
+      });
+      const args = decoded.args;
+      if (
+        args.target.toLowerCase() === target.toLowerCase() &&
+        args.scanOK === scanOK &&
+        args.visionOK === visionOK &&
+        args.dualOK === (scanOK && visionOK)
+      ) {
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}

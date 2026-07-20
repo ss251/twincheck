@@ -5,8 +5,9 @@ pragma solidity ^0.8.24;
 /// @notice Dual-principal dual-explorer source-verification cards for Monad registry addresses.
 /// @dev Closes the gap filed in monad-crypto/protocols#369: automatic check that contracts are
 ///      verified on BOTH Monadscan and MonadVision. Two independent attestors (principals A + B)
-///      each report observations; when both agree, status settles. A flip vs prior settled state
-///      emits DualStatusPulse — a public on-chain integrity signal a private CSV cannot provide.
+///      each report observations; fresh matching observations settle the status. A flip vs prior
+///      settled state emits DualStatusPulse — a public on-chain integrity signal a private CSV
+///      cannot provide.
 contract TwinCheck {
     // ─────────────────────────────────────────────────────────────────────────
     // Errors
@@ -17,7 +18,7 @@ contract TwinCheck {
     error SameAttestors();
     error NotWatched(address target);
     error AlreadyWatched(address target);
-    
+    error ZeroEvidence();
 
     // ─────────────────────────────────────────────────────────────────────────
     // Types
@@ -48,20 +49,10 @@ contract TwinCheck {
 
     event Watched(address indexed target, address indexed by, uint64 at);
     event Reported(
-        address indexed target,
-        address indexed attestor,
-        bool scanOK,
-        bool visionOK,
-        bytes32 evidenceHash,
-        uint64 at
+        address indexed target, address indexed attestor, bool scanOK, bool visionOK, bytes32 evidenceHash, uint64 at
     );
     event DualStatusSettled(
-        address indexed target,
-        bool scanOK,
-        bool visionOK,
-        bool dualOK,
-        bytes32 evidenceHash,
-        uint64 checkedAt
+        address indexed target, bool scanOK, bool visionOK, bool dualOK, bytes32 evidenceHash, uint64 checkedAt
     );
     /// @notice Emitted when settled dual status differs from the previous settled status.
     event DualStatusPulse(
@@ -80,6 +71,7 @@ contract TwinCheck {
 
     address public immutable attestorA;
     address public immutable attestorB;
+    uint64 public constant MAX_REPORT_AGE = 5 minutes;
 
     mapping(address target => Card) public cards;
     mapping(address target => mapping(address attestor => Observation)) public reports;
@@ -111,7 +103,7 @@ contract TwinCheck {
     // Watchlist
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @notice Mark a registry (or any) address as watched. Idempotent for already-watched.
+    /// @notice Mark a registry (or any) address as watched; reverts if already watched.
     function watch(address target) external onlyAttestor {
         if (target == address(0)) revert ZeroAddress();
         if (cards[target].watched) revert AlreadyWatched(target);
@@ -146,14 +138,13 @@ contract TwinCheck {
     // Dual-principal report + settle
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @notice Attestor posts dual-explorer observation for a watched target.
-    /// @dev When both attestors have posted matching (scanOK, visionOK), status settles.
-    ///      If settled bits flip vs previous settled card, emits DualStatusPulse.
-    function report(address target, bool scanOK, bool visionOK, bytes32 evidenceHash)
-        external
-        onlyAttestor
-    {
+    /// @notice Attestor posts a dual-explorer observation with a nonzero evidence hash.
+    /// @dev Matching observations settle only when both were posted within MAX_REPORT_AGE. A
+    ///      settlement binds both evidence hashes and consumes both observations. If settled bits
+    ///      flip vs the previous settled card, emits DualStatusPulse.
+    function report(address target, bool scanOK, bool visionOK, bytes32 evidenceHash) external onlyAttestor {
         if (!cards[target].watched) revert NotWatched(target);
+        if (evidenceHash == bytes32(0)) revert ZeroEvidence();
 
         reports[target][msg.sender] = Observation({
             scanOK: scanOK,
@@ -167,36 +158,45 @@ contract TwinCheck {
 
         Observation memory oa = reports[target][attestorA];
         Observation memory ob = reports[target][attestorB];
-        // Wait until both attestors have posted matching bits. A solo re-report
-        // after a prior settle must not revert — the other principal still has
-        // the old observation until they re-check.
+        // Wait until both attestors have posted matching bits. After a settlement
+        // consumes both observations, a solo re-report waits for a fresh counterpart.
         if (!oa.exists || !ob.exists) return;
+        uint64 oldestReport = oa.reportedAt < ob.reportedAt ? oa.reportedAt : ob.reportedAt;
+        if (uint64(block.timestamp) - oldestReport > MAX_REPORT_AGE) return;
         if (oa.scanOK != ob.scanOK || oa.visionOK != ob.visionOK) return;
 
-        _settle(target, oa.scanOK, oa.visionOK, oa.evidenceHash);
+        // Bind BOTH principals' evidence into the settled commitment so the dual
+        // card represents a genuine consensus, not just attestorA's evidence.
+        bytes32 dualEvidence = keccak256(abi.encode(oa.evidenceHash, ob.evidenceHash));
+        _settle(target, oa.scanOK, oa.visionOK, dualEvidence);
+
+        // Consume both observations. Each settlement must be backed by a FRESH
+        // dual report from both principals; without this a single attestor could
+        // unilaterally re-settle (and re-emit DualStatusSettled/Pulse) forever by
+        // replaying the counterparty's one-time stale observation.
+        delete reports[target][attestorA];
+        delete reports[target][attestorB];
     }
 
-    function _settle(address target, bool scanOK, bool visionOK, bytes32 evidenceHash) internal {
+    function _settle(address target, bool scanOk, bool visionOk, bytes32 evidenceHash) internal {
         Card storage c = cards[target];
         bool hadSettled = c.settled;
         bool prevScan = c.scanOK;
         bool prevVision = c.visionOK;
 
         c.settled = true;
-        c.scanOK = scanOK;
-        c.visionOK = visionOK;
+        c.scanOK = scanOk;
+        c.visionOK = visionOk;
         c.checkedAt = uint64(block.timestamp);
         c.evidenceHash = evidenceHash;
         c.settlerA = attestorA;
         c.settlerB = attestorB;
 
-        bool bothOK = scanOK && visionOK;
-        emit DualStatusSettled(target, scanOK, visionOK, bothOK, evidenceHash, c.checkedAt);
+        bool bothOk = scanOk && visionOk;
+        emit DualStatusSettled(target, scanOk, visionOk, bothOk, evidenceHash, c.checkedAt);
 
-        if (hadSettled && (prevScan != scanOK || prevVision != visionOK)) {
-            emit DualStatusPulse(
-                target, prevScan, prevVision, scanOK, visionOK, bothOK, c.checkedAt
-            );
+        if (hadSettled && (prevScan != scanOk || prevVision != visionOk)) {
+            emit DualStatusPulse(target, prevScan, prevVision, scanOk, visionOk, bothOk, c.checkedAt);
         }
     }
 
@@ -227,14 +227,15 @@ contract TwinCheck {
         )
     {
         Card memory c = cards[target];
-        return (
-            c.watched,
-            c.settled,
-            c.scanOK,
-            c.visionOK,
-            c.settled && c.scanOK && c.visionOK,
-            c.checkedAt,
-            c.evidenceHash
-        );
+        return
+            (
+                c.watched,
+                c.settled,
+                c.scanOK,
+                c.visionOK,
+                c.settled && c.scanOK && c.visionOK,
+                c.checkedAt,
+                c.evidenceHash
+            );
     }
 }

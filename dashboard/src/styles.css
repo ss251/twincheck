@@ -787,6 +787,35 @@ code {
   color: var(--faint);
 }
 
+/* both-fail coherence: the twins still AGREE — say so, calmly */
+.agree-note {
+  margin: 2px 0 0;
+  font-size: 0.78rem;
+  color: var(--dim);
+}
+
+.agree-note em {
+  font-style: normal;
+  color: var(--ink);
+}
+
+/* actionable next step on split / both-fail cards */
+.remedy {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--faint);
+}
+
+.remedy a {
+  color: var(--dim);
+  text-decoration-color: var(--line-strong);
+}
+
+.remedy a:hover {
+  color: var(--monad);
+}
+
 .tcard-foot {
   display: flex;
   justify-content: space-between;

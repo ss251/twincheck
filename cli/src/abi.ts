@@ -7,6 +7,18 @@ export const twinAbi = [
     outputs: [],
   },
   {
+    type: "event",
+    name: "DualStatusSettled",
+    inputs: [
+      { name: "target", type: "address", indexed: true },
+      { name: "scanOK", type: "bool", indexed: false },
+      { name: "visionOK", type: "bool", indexed: false },
+      { name: "dualOK", type: "bool", indexed: false },
+      { name: "evidenceHash", type: "bytes32", indexed: false },
+      { name: "checkedAt", type: "uint64", indexed: false },
+    ],
+  },
+  {
     type: "function",
     name: "watchBatch",
     stateMutability: "nonpayable",

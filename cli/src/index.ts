@@ -10,17 +10,26 @@
  *   twincheck run     — sample registry, watch, dual-report (demo path)
  */
 import type { Address, Hex } from "viem";
-import { getConfig, loadEnv, txUrl, addressUrl } from "./config";
+import type { TwinConfig } from "./config";
+import {
+  getConfig,
+  getProbeConfig,
+  loadEnv,
+  txUrl,
+  addressUrl,
+} from "./config";
 import {
   getCode,
+  hasMatchingSettlement,
   hashEvidence,
   readCard,
   reportOne,
+  validateAttestorConfig,
   watchBatch,
-  watchOne,
 } from "./client";
 import {
   evidenceHashPayload,
+  hasProbeError,
   probeDual,
   type DualResult,
 } from "./explorers";
@@ -65,23 +74,33 @@ function asAddr(s: string): Address {
 }
 
 async function cmdProbe(flags: Record<string, string | boolean>) {
-  const cfg = getConfig();
+  const cfg = getProbeConfig();
   const address = asAddr(String(flags.address));
   const r = await probeDual(address, cfg);
   printDual(r);
+  // exit 0 = dual verified, 1 = genuinely not dual-verified, 2 = indeterminate
+  if (hasProbeError(r)) process.exit(2);
   process.exit(r.scanOK && r.visionOK ? 0 : 1);
 }
 
-function printDual(r: DualResult) {
-  const dual = r.scanOK && r.visionOK;
+function printDual(r: DualResult, label?: string) {
+  const dual = !hasProbeError(r) && r.scanOK && r.visionOK;
   console.log(
     JSON.stringify(
       {
+        ...(label ? { observer: label } : {}),
         address: r.address,
         dualOK: dual,
-        monadscan: { ok: r.scanOK, signal: r.scanSignal, url: r.scanUrl },
+        indeterminate: hasProbeError(r) || undefined,
+        monadscan: {
+          ok: r.scanOK,
+          error: r.scanError || undefined,
+          signal: r.scanSignal,
+          url: r.scanUrl,
+        },
         monadVision: {
           ok: r.visionOK,
+          error: r.visionError || undefined,
           signal: r.visionSignal,
           url: r.visionUrl,
         },
@@ -97,10 +116,18 @@ async function cmdWatch(flags: Record<string, string | boolean>) {
   const cfg = getConfig();
   const code = await getCode(cfg, cfg.twin);
   if (!code || code === "0x") throw new Error(`No code at ${cfg.twin}`);
+  await validateAttestorConfig(cfg);
 
   if (flags.address) {
     const target = asAddr(String(flags.address));
-    const hash = await watchOne(cfg, cfg.keyA, target);
+    // TwinCheck.watch reverts AlreadyWatched — pre-check instead of burning
+    // gas on a guaranteed revert (same guard dualReport already uses).
+    const card = await readCard(cfg, target);
+    if (card[0]) {
+      console.log(`already watched ${target} — nothing to do`);
+      return;
+    }
+    const hash = await watchBatch(cfg, cfg.keyA, [target]);
     console.log(`watched ${target}`);
     console.log(`tx ${txUrl(cfg, hash)}`);
     return;
@@ -116,25 +143,159 @@ async function cmdWatch(flags: Record<string, string | boolean>) {
   console.log(`tx ${txUrl(cfg, hash)}`);
 }
 
-async function dualReport(cfg: ReturnType<typeof getConfig>, target: Address, r: DualResult) {
-  const payload = evidenceHashPayload(r);
-  const eh = hashEvidence(payload);
-  console.log(`evidenceHash ${eh}`);
-  console.log(`payload ${payload}`);
+export type DualReportOutcome = {
+  rA: DualResult;
+  rB: DualResult;
+  reportedA: boolean;
+  reportedB: boolean;
+  settledThisRun: boolean;
+  cardSettled: boolean;
+  cardDualOK: boolean;
+};
 
+type CardState = readonly [
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  bigint,
+  Hex,
+];
+
+export type DualReportDependencies = {
+  readCard: (cfg: TwinConfig, target: Address) => Promise<CardState>;
+  watchBatch: (
+    cfg: TwinConfig,
+    key: Hex,
+    targets: Address[],
+  ) => Promise<Hex>;
+  probeDual: (
+    target: Address,
+    cfg: TwinConfig,
+  ) => Promise<DualResult>;
+  reportOne: (
+    cfg: TwinConfig,
+    key: Hex,
+    target: Address,
+    scanOK: boolean,
+    visionOK: boolean,
+    evidenceHash: Hex,
+  ) => Promise<{
+    hash: Hex;
+    receipt: {
+      logs: readonly {
+        address: Address;
+        data: Hex;
+        topics: readonly Hex[];
+      }[];
+    };
+  }>;
+};
+
+const defaultDualReportDependencies: DualReportDependencies = {
+  readCard,
+  watchBatch,
+  probeDual,
+  reportOne,
+};
+
+/**
+ * Dual-principal attestation with INDEPENDENT measurements: each principal
+ * runs its own explorer probe and signs its own observation. The contract
+ * settles only when both independently-observed bit sets match (and consumes
+ * both observations — see TwinCheck.report). One shared measurement signed
+ * twice would make the second signature meaningless.
+ */
+export async function dualReport(
+  cfg: TwinConfig,
+  target: Address,
+  deps: DualReportDependencies = defaultDualReportDependencies,
+): Promise<DualReportOutcome> {
   // Ensure watched
-  const card = await readCard(cfg, target);
+  const card = await deps.readCard(cfg, target);
   if (!card[0]) {
-    const wh = await watchOne(cfg, cfg.keyA, target);
+    const wh = await deps.watchBatch(cfg, cfg.keyA, [target]);
     console.log(`watch tx ${txUrl(cfg, wh)}`);
   }
 
-  const ha = await reportOne(cfg, cfg.keyA, target, r.scanOK, r.visionOK, eh);
-  console.log(`report A ${txUrl(cfg, ha)}`);
-  const hb = await reportOne(cfg, cfg.keyB, target, r.scanOK, r.visionOK, eh);
-  console.log(`report B ${txUrl(cfg, hb)}`);
+  const principals = [
+    { label: "A", key: cfg.keyA },
+    { label: "B", key: cfg.keyB },
+  ] as const;
 
-  const after = await readCard(cfg, target);
+  const results = await Promise.all(
+    principals.map(async (p) => {
+      const r = await deps.probeDual(target, cfg);
+      printDual(r, `principal ${p.label}`);
+      return r;
+    }),
+  );
+  const reported = [false, false];
+  let settledThisRun = false;
+  for (let i = 0; i < principals.length; i++) {
+    const p = principals[i];
+    const r = results[i];
+    if (hasProbeError(r)) {
+      console.error(
+        `principal ${p.label}: refusing to attest ${target} — indeterminate probe ` +
+          `(monadscan=${r.scanSignal}, monadVision=${r.visionSignal})`,
+      );
+    }
+  }
+
+  const [rA, rB] = results;
+  const determinate = !hasProbeError(rA) && !hasProbeError(rB);
+  const agrees = rA.scanOK === rB.scanOK && rA.visionOK === rB.visionOK;
+  if (determinate && agrees) {
+    const evidence = results.map((r, i) => {
+      const payload = evidenceHashPayload(r);
+      const hash = hashEvidence(payload);
+      console.log(`principal ${principals[i].label} evidenceHash ${hash}`);
+      console.log(`principal ${principals[i].label} payload ${payload}`);
+      return hash;
+    });
+    const submit = async (i: number): Promise<boolean> => {
+      const p = principals[i];
+      const r = results[i];
+      const report = await deps.reportOne(
+        cfg,
+        p.key,
+        target,
+        r.scanOK,
+        r.visionOK,
+        evidence[i],
+      );
+      console.log(`report ${p.label} ${txUrl(cfg, report.hash)}`);
+      reported[i] = true;
+      return hasMatchingSettlement(
+        report.receipt.logs,
+        cfg.twin,
+        target,
+        r.scanOK,
+        r.visionOK,
+      );
+    };
+
+    await submit(0);
+    settledThisRun = await submit(1);
+    if (!settledThisRun) settledThisRun = await submit(0);
+  }
+
+  if (!determinate) {
+    console.error(
+      `no attestation for ${target}: at least one principal had an indeterminate probe. ` +
+        `Transient explorer failures must not be recorded on-chain as "unverified".`,
+    );
+  }
+  if (determinate && !agrees) {
+    console.error(
+      `principals disagree on ${target} (A: scan=${rA.scanOK}/vision=${rA.visionOK}, ` +
+        `B: scan=${rB.scanOK}/vision=${rB.visionOK}) — refusing to submit either report`,
+    );
+  }
+
+  const after = await deps.readCard(cfg, target);
   console.log(
     JSON.stringify(
       {
@@ -151,15 +312,37 @@ async function dualReport(cfg: ReturnType<typeof getConfig>, target: Address, r:
       2,
     ),
   );
+  return {
+    rA,
+    rB,
+    reportedA: reported[0],
+    reportedB: reported[1],
+    settledThisRun,
+    cardSettled: Boolean(after[1]),
+    cardDualOK: Boolean(after[4]),
+  };
 }
 
 async function cmdCheck(flags: Record<string, string | boolean>) {
   const cfg = getConfig();
   const target = asAddr(String(flags.address));
-  const r = await probeDual(target, cfg);
-  printDual(r);
-  await dualReport(cfg, target, r);
-  process.exit(r.scanOK && r.visionOK ? 0 : 1);
+  await validateAttestorConfig(cfg);
+  // Each principal probes AND signs independently inside dualReport.
+  const out = await dualReport(cfg, target);
+  // exit 0 = settled dual-verified, 1 = determinate but not dual-verified,
+  // 2 = at least one principal could not get a trustworthy answer
+  process.exit(dualReportExitCode(out));
+}
+
+export function dualReportExitCode(out: DualReportOutcome): 0 | 1 | 2 {
+  if (hasProbeError(out.rA) || hasProbeError(out.rB)) return 2;
+  return out.settledThisRun &&
+    out.rA.scanOK &&
+    out.rA.visionOK &&
+    out.rB.scanOK &&
+    out.rB.visionOK
+    ? 0
+    : 1;
 }
 
 async function cmdCard(flags: Record<string, string | boolean>) {
@@ -186,6 +369,7 @@ async function cmdCard(flags: Record<string, string | boolean>) {
 
 async function cmdRun(flags: Record<string, string | boolean>) {
   const cfg = getConfig();
+  await validateAttestorConfig(cfg);
   const limit = Number(flags.limit || "5");
   const seed = flags.seed ? asAddr(String(flags.seed)) : null;
 
@@ -217,19 +401,24 @@ async function cmdRun(flags: Record<string, string | boolean>) {
   const wh = await watchBatch(cfg, cfg.keyA, pick);
   console.log(`watchBatch ${txUrl(cfg, wh)}`);
 
+  let failures = 0;
   for (const target of pick) {
-    console.log(`\n── probe ${target} ──`);
+    console.log(`\n── check ${target} ──`);
     try {
-      const r = await probeDual(target, cfg);
-      printDual(r);
-      await dualReport(cfg, target, r);
+      const out = await dualReport(cfg, target);
+      if (!out.reportedA || !out.reportedB) failures++;
       // polite delay for explorers + RPC
       await Bun.sleep(400);
     } catch (e) {
-      console.error(`fail ${target}:`, e);
+      failures++;
+      console.error(`fail ${target}:`, e instanceof Error ? e.message : e);
     }
   }
   console.log("\ndone. open dashboard with VITE_TWINCHECK=" + cfg.twin);
+  if (failures > 0) {
+    console.error(`${failures}/${pick.length} addresses failed — exiting non-zero`);
+    process.exit(1);
+  }
 }
 
 async function main() {
@@ -250,4 +439,4 @@ async function main() {
   }
 }
 
-main();
+if (import.meta.main) main();

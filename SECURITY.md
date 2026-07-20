@@ -1,6 +1,6 @@
 # TwinCheck security notes (solidity-auditor pass)
 
-Scope: `src/TwinCheck.sol` only (new product). Dead `DoneStamp` / `FleetLedger` out of scope.
+Scope: `src/TwinCheck.sol`.
 
 ## Threat model
 
@@ -12,7 +12,7 @@ Scope: `src/TwinCheck.sol` only (new product). Dead `DoneStamp` / `FleetLedger` 
 
 | Sev | Finding | Status |
 |-----|---------|--------|
-| Low | Attestors can report incorrect explorer status (oracle honesty) | Accepted by design — dual principal reduces single-key lie; evidenceHash binds payload |
+| Low | Attestors can report incorrect explorer status (oracle honesty) | Accepted by design — dual principal reduces a single-key lie; the settled evidence hash binds both payload hashes |
 | Low | No pause / upgrade | Immutable attestors — intentional for hackathon simplicity |
 | Info | Watchlist grows unbounded | Acceptable for registry sample; batch watch used |
 | Info | First settle does not emit Pulse (only flips) | By design |
@@ -22,8 +22,11 @@ Scope: `src/TwinCheck.sol` only (new product). Dead `DoneStamp` / `FleetLedger` 
 ## Mitigations present
 
 - Immutable dual attestors set at deploy
-- Settle only when both attestors post **matching** bits
+- Reports require a nonzero evidence hash
+- Settle only when both attestors post **matching** bits within the five-minute `MAX_REPORT_AGE` window
 - Mismatch waits (no partial settle)
+- Settled evidence commits to both attestors' evidence hashes
+- Successful settlement consumes both observations, preventing stale-counterparty replay
 - Zero address rejected on watch
 - Comprehensive Foundry tests (`test/TwinCheck.t.sol`)
 
