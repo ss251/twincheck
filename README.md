@@ -1,21 +1,41 @@
 # TwinCheck
 
-**Dual-explorer source verification for Monad’s official protocol address book.**
+**Dual-explorer source verification for Monad's official protocol address book.**
 
 When you copy an address from [`monad-crypto/protocols`](https://github.com/monad-crypto/protocols), TwinCheck tells you whether source is verified on **both** [Monadscan](https://monadscan.com) **and** [MonadVision](https://monadvision.com) — and posts a public on-chain pulse when that dual status flips.
 
-> Closes the open ecosystem gap:  
+> Closes the open ecosystem gap:
 > [**protocols#369** — automatic check that all contracts are verified on both monadvision and monadscan](https://github.com/monad-crypto/protocols/issues/369)
 
-This is a problem the **Monad ecosystem** has — not a generic rug-checker.
+## Try it in 30 seconds — no keys, no config
 
-## Why TwinCheck
+The checker itself is a plain read-only probe. Nothing on-chain, no accounts, no API keys:
 
-| Today | TwinCheck |
-|-------|-----------|
-| Hand-open both explorers for ~1.7k registry addresses | Live dual probe + dual-principal on-chain card |
-| pev / tools only hit one Sourcify path | Explicit dual status: scanOK × visionOK |
-| Split status is invisible | Settled cards + `DualStatusPulse` events |
+```bash
+cd cli && bun install
+bun run src/index.ts probe --address 0x93FE94Ad887a1B04DBFf1f736bfcD1698D4cfF66
+```
+
+```json
+{
+  "address": "0x93FE94Ad887a1B04DBFf1f736bfcD1698D4cfF66",
+  "dualOK": true,
+  "monadscan":   { "ok": true, "signal": "verified" },
+  "monadVision": { "ok": true, "signal": "exact_match" }
+}
+```
+
+Exit codes are CI-friendly: `0` dual-verified, `1` genuinely unverified somewhere, `2` indeterminate (explorer timeout/rate-limit — the checker refuses to call that "unverified").
+
+## Two layers, adopt either
+
+**1. The reusable checker (`cli/`)** — zero-dependency-on-us dual probe of Monadscan (HTML status) + MonadVision (BlockVision Sourcify API), with per-attempt timeouts, retry with backoff, and an explicit *error* signal class so transient failures are never reported as "unverified". This alone answers #369 for the registry CSV: `twincheck run` sweeps a sample end-to-end.
+
+**2. The on-chain trust layer (`src/TwinCheck.sol` + `dashboard/`)** — optional, for when a status claim should be *attributable*: two independent principals each run their own probe and sign their own observation; the contract settles a card only when both independently agree, and emits `DualStatusPulse` when a settled status flips. The dashboard renders the cards and the pulse feed.
+
+## Adopt this (the ask)
+
+For `monad-crypto/protocols` maintainers: a scheduled CI job that runs `twincheck probe` (or `run`) over the registry CSV and fails / opens an issue when a registry address loses dual verification. The checker is MIT, needs no keys for probing, and its exit codes are built for exactly this. We're happy to contribute the GitHub Action.
 
 ## Live (Monad Testnet)
 
@@ -29,18 +49,21 @@ This is a problem the **Monad ecosystem** has — not a generic rug-checker.
 | **Vision verify** | Sourcify **exact_match** |
 | **Scan verify** | requires Etherscan API key (docs); TwinCheck *detects* unverified on scan as the product |
 
-## Architecture
+## CLI
 
-1. **Contract** (`src/TwinCheck.sol`) — watchlist + dual-principal `report` → settle; pulse on flip  
-2. **Checker** (`cli/`) — loads official CSV, probes both explorers (zero mocks), attests with keys A then B  
-3. **Dashboard** (`dashboard/`) — dual-verify cards + live event feed  
+```
+twincheck probe --address 0x…     # live dual-explorer check (read-only, no keys)
+twincheck watch --limit 10        # watch registry sample (needs keys)
+twincheck check --address 0x…     # independent dual-principal probes + onchain reports
+twincheck run --limit 5           # end-to-end sample
+twincheck card --address 0x…      # read a settled card
+```
 
-## Quick start
+`watch`/`check`/`run`/`card` need env: `PRIVATE_KEY`, `PRINCIPAL_B_PRIVATE_KEY`, `TWINCHECK`, `MONAD_RPC_URL`. `probe` needs nothing.
+
+## Deploy your own trust layer
 
 ```bash
-# env: PRIVATE_KEY, PRINCIPAL_B_PRIVATE_KEY, TWINCHECK, MONAD_RPC_URL
-cp .env.example .env   # fill keys
-
 forge test --match-contract TwinCheckTest
 forge script script/DeployTwinCheck.s.sol:DeployTwinCheck --rpc-url $MONAD_RPC_URL --broadcast
 
@@ -50,21 +73,7 @@ forge verify-contract $TWINCHECK src/TwinCheck.sol:TwinCheck \
   --verifier-url https://sourcify-api-monad.blockvision.org/ \
   --constructor-args $(cast abi-encode "constructor(address,address)" $DEPLOYER_ADDRESS $PRINCIPAL_B_ADDRESS)
 
-cd cli && bun install
-bun run src/index.ts probe --address 0x93FE94Ad887a1B04DBFf1f736bfcD1698D4cfF66
-bun run src/index.ts run --limit 5
-
-cd ../dashboard && bun install && bun run dev
-```
-
-## CLI
-
-```
-twincheck probe --address 0x…     # live dual-explorer check
-twincheck watch --limit 10        # watch registry sample
-twincheck check --address 0x…     # probe + dual-principal onchain report
-twincheck run --limit 5           # end-to-end sample
-twincheck card --address 0x…
+cd dashboard && bun install && bun run dev   # VITE_TWINCHECK=<your deploy>
 ```
 
 ## Honest limits
@@ -79,4 +88,4 @@ See `submission.md` and `DEMO.md`. Axis: elegant solution to a real ecosystem pr
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE) — take the checker, the contract, or both.

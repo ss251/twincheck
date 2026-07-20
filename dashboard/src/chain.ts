@@ -66,6 +66,22 @@ export const twinAbi = [
   },
   {
     type: "function",
+    name: "reports",
+    stateMutability: "view",
+    inputs: [
+      { name: "target", type: "address" },
+      { name: "attestor", type: "address" },
+    ],
+    outputs: [
+      { name: "scanOK", type: "bool" },
+      { name: "visionOK", type: "bool" },
+      { name: "evidenceHash", type: "bytes32" },
+      { name: "reportedAt", type: "uint64" },
+      { name: "exists", type: "bool" },
+    ],
+  },
+  {
+    type: "function",
     name: "attestorA",
     stateMutability: "view",
     inputs: [],
@@ -94,6 +110,8 @@ export const pulseEvent = parseAbiItem(
 );
 
 export type PulseEvent = {
+  /** Stable identity: `${tx}:${logIndex}` — used for dedupe + React keys. */
+  key: string;
   kind: "Pulse" | "Settled" | "Reported" | "Watched";
   target: Address;
   scanOK?: boolean;
@@ -126,37 +144,102 @@ export function scanAddr(addr: string): string {
 /** Monad public RPC caps eth_getLogs to a 100-block range. */
 export const LOG_PAGE_SIZE = 100n;
 
-export async function getAllLogsPaged(opts: {
+/**
+ * Block the TwinCheck contract was deployed at (from the forge broadcast,
+ * broadcast/DeployTwinCheck.s.sol/10143/run-latest.json). Scanning starts
+ * here — nothing earlier can contain TwinCheck events.
+ */
+export const DEPLOY_BLOCK = BigInt(
+  import.meta.env.VITE_TWINCHECK_DEPLOY_BLOCK || "46032958",
+);
+
+/**
+ * Scan [from, to] FORWARD in ≤100-block pages, stopping once `pageBudget`
+ * pages have been fetched. Returns the logs found plus the last block
+ * actually covered, so callers can persist a frontier and resume next poll.
+ */
+export async function scanLogsForward(opts: {
   address: Address;
-  toBlock: bigint;
-  maxPages?: number;
+  from: bigint;
+  to: bigint;
+  pageBudget?: number;
   concurrency?: number;
-}): Promise<Log[]> {
-  const maxPages = opts.maxPages ?? 40;
+}): Promise<{ logs: Log[]; scannedTo: bigint }> {
+  const pageBudget = opts.pageBudget ?? 200;
   const concurrency = opts.concurrency ?? 5;
+  if (opts.from > opts.to) return { logs: [], scannedTo: opts.to };
+
   const ranges: { from: bigint; to: bigint }[] = [];
-  let to = opts.toBlock;
-  for (let i = 0; i < maxPages && to >= 0n; i++) {
-    const span = to + 1n < LOG_PAGE_SIZE ? to + 1n : LOG_PAGE_SIZE;
-    const from = to + 1n > span ? to + 1n - span : 0n;
+  let from = opts.from;
+  for (let i = 0; i < pageBudget && from <= opts.to; i++) {
+    const to = from + LOG_PAGE_SIZE - 1n < opts.to ? from + LOG_PAGE_SIZE - 1n : opts.to;
     ranges.push({ from, to });
-    if (from === 0n) break;
-    to = from - 1n;
+    from = to + 1n;
   }
 
   const out: Log[] = [];
+  let scannedTo = opts.from - 1n;
   for (let i = 0; i < ranges.length; i += concurrency) {
     const batch = ranges.slice(i, i + concurrency);
     const chunks = await Promise.all(
-      batch.map(({ from, to: t }) =>
-        client.getLogs({
-          address: opts.address,
-          fromBlock: from,
-          toBlock: t,
-        }),
+      batch.map((r) =>
+        client.getLogs({ address: opts.address, fromBlock: r.from, toBlock: r.to }),
       ),
     );
     for (const chunk of chunks) out.push(...chunk);
+    scannedTo = batch[batch.length - 1].to;
+    // Monad public RPC allows 25 req/s per IP — pace the backfill so the
+    // dashboard never trips the limit (and leaves headroom for card reads).
+    if (i + concurrency < ranges.length) {
+      await new Promise((r) => setTimeout(r, 350));
+    }
   }
-  return out;
+  return { logs: out, scannedTo };
+}
+
+// ── Feed cache (localStorage) ────────────────────────────────────────────────
+// The full history from DEPLOY_BLOCK is scanned once per browser; afterwards
+// each poll only fetches blocks past the persisted frontier.
+
+type StoredEvent = Omit<PulseEvent, "blockNumber"> & { blockNumber: string };
+type FeedCacheShape = {
+  version: number;
+  frontier: string;
+  events: StoredEvent[];
+};
+
+const FEED_CACHE_VERSION = 1;
+
+function feedCacheKey(): string {
+  return `twincheck.feed.v${FEED_CACHE_VERSION}.${MONAD_CHAIN_ID}.${TWIN.toLowerCase()}`;
+}
+
+export function loadFeedCache(): { frontier: bigint; events: PulseEvent[] } | null {
+  try {
+    const raw = localStorage.getItem(feedCacheKey());
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as FeedCacheShape;
+    if (parsed.version !== FEED_CACHE_VERSION || !Array.isArray(parsed.events)) {
+      return null;
+    }
+    return {
+      frontier: BigInt(parsed.frontier),
+      events: parsed.events.map((e) => ({ ...e, blockNumber: BigInt(e.blockNumber) })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveFeedCache(frontier: bigint, events: PulseEvent[]): void {
+  try {
+    const shape: FeedCacheShape = {
+      version: FEED_CACHE_VERSION,
+      frontier: frontier.toString(),
+      events: events.map((e) => ({ ...e, blockNumber: e.blockNumber.toString() })),
+    };
+    localStorage.setItem(feedCacheKey(), JSON.stringify(shape));
+  } catch {
+    /* private mode / quota — cache is an optimization, not a requirement */
+  }
 }
